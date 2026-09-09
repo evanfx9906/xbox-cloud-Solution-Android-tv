@@ -69,6 +69,63 @@ private boolean showStats=false;
         this.showStats=enablestats;
     }
 
+    // --- Surgical addition: live bitrate / ping / packet-loss for the thin stats bar ---
+    private long lastStatsBytesReceived = -1;
+    private long lastStatsTimeMs = 0;
+
+    private String buildLiveNetworkStatsString(org.webrtc.RTCStatsReport report) {
+        double kbps = -1;
+        double lossPercent = -1;
+        double rttMs = -1;
+
+        for (RTCStats r : report.getStatsMap().values()) {
+            if ("inbound-rtp".equals(r.getType()) && "video".equals(r.getMembers().get("kind"))) {
+                Object bytesObj = r.getMembers().get("bytesReceived");
+                if (bytesObj instanceof Number) {
+                    long bytesReceived = ((Number) bytesObj).longValue();
+                    long nowMs = System.currentTimeMillis();
+                    if (lastStatsBytesReceived >= 0 && nowMs > lastStatsTimeMs) {
+                        long deltaBytes = bytesReceived - lastStatsBytesReceived;
+                        double deltaSeconds = (nowMs - lastStatsTimeMs) / 1000.0;
+                        if (deltaBytes >= 0 && deltaSeconds > 0) {
+                            kbps = (deltaBytes * 8.0 / 1000.0) / deltaSeconds;
+                        }
+                    }
+                    lastStatsBytesReceived = bytesReceived;
+                    lastStatsTimeMs = nowMs;
+                }
+
+                Object lostObj = r.getMembers().get("packetsLost");
+                Object recvObj = r.getMembers().get("packetsReceived");
+                if (lostObj instanceof Number && recvObj instanceof Number) {
+                    double lost = ((Number) lostObj).doubleValue();
+                    double recv = ((Number) recvObj).doubleValue();
+                    double total = lost + recv;
+                    if (total > 0) {
+                        lossPercent = (lost / total) * 100.0;
+                    }
+                }
+            } else if ("candidate-pair".equals(r.getType())) {
+                Object stateObj = r.getMembers().get("state");
+                Object nominatedObj = r.getMembers().get("nominated");
+                boolean nominated = nominatedObj instanceof Boolean && (Boolean) nominatedObj;
+                if (nominated && "succeeded".equals(stateObj)) {
+                    Object rttObj = r.getMembers().get("currentRoundTripTime");
+                    if (rttObj instanceof Number) {
+                        rttMs = ((Number) rttObj).doubleValue() * 1000.0;
+                    }
+                }
+            }
+        }
+
+        String bitrateStr = kbps >= 0 ? String.format(Locale.US, "%.0f kbps", kbps) : "-- kbps";
+        String pingStr = rttMs >= 0 ? String.format(Locale.US, "%.0f ms", rttMs) : "-- ms";
+        String lossStr = lossPercent >= 0 ? String.format(Locale.US, "%.1f%% loss", lossPercent) : "0.0% loss";
+
+        return bitrateStr + "  \u00b7  " + pingStr + "  \u00b7  " + lossStr;
+    }
+    // --- end surgical addition ---
+
     public interface SignalingListener {
         void onLocalIceCandidate(IceCandidate candidate);
         void onIceConnectionChange(PeerConnection.IceConnectionState state);
@@ -535,10 +592,16 @@ private boolean showStats=false;
     @Override
     public void onLogMessage(String message, Logging.Severity severity, String tag) {
 
-        if (showStats && message != null && message.startsWith("stream-rendererDuration:")) {
-            String stats = message.substring("stream-rendererDuration: ".length());
-            if (signalingListener != null) {
-                signalingListener.onPerformanceStatsReceived(stats);
+        if (showStats && message != null && message.startsWith("stream-rendererDuration:") && peerConnection != null) {
+            try {
+                peerConnection.getStats(report -> {
+                    String stats = buildLiveNetworkStatsString(report);
+                    if (signalingListener != null) {
+                        signalingListener.onPerformanceStatsReceived(stats);
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to collect live stats", e);
             }
         }
     }
