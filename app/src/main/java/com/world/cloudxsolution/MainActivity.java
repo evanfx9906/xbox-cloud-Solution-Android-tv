@@ -7,10 +7,13 @@ import android.content.ComponentName;
 import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.content.res.Configuration;
 import android.media.AudioManager;
+import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.IBinder;
@@ -49,6 +52,9 @@ import androidx.appcompat.view.WindowCallbackWrapper;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 import androidx.core.splashscreen.SplashScreen;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import org.json.JSONObject;
 import org.webrtc.IceCandidate;
@@ -171,9 +177,26 @@ public class MainActivity extends AppCompatActivity {
         @Override public void onPerformanceStatsReceived(String stats) {
             runOnUiThread(() -> {
                 if (performanceDialog != null && performanceDialog.isShowing()) {
-                    performanceDialog.updateStats(stats);
+                    int battery = getBatteryPercent();
+                    String withBattery = battery >= 0 ? (stats + "  \u00b7  " + battery + "% batt") : stats;
+                    performanceDialog.updateStats(withBattery);
                 }
             });
+        }
+
+        // --- Surgical addition: read device battery percent for the thin stats bar ---
+        private int getBatteryPercent() {
+            try {
+                IntentFilter filter = new IntentFilter(Intent.ACTION_BATTERY_CHANGED);
+                Intent batteryStatus = registerReceiver(null, filter);
+                if (batteryStatus == null) return -1;
+                int level = batteryStatus.getIntExtra(BatteryManager.EXTRA_LEVEL, -1);
+                int scale = batteryStatus.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
+                if (level < 0 || scale <= 0) return -1;
+                return Math.round(level * 100f / scale);
+            } catch (Exception e) {
+                return -1;
+            }
         }
 
         @Override public void onFirstFrameRendered(int w, int h) {
@@ -220,6 +243,60 @@ public class MainActivity extends AppCompatActivity {
             runOnUiThread(() -> nativeGamepadEnabled = enabled);
         }
     };
+
+    // --- Surgical addition: edge-to-edge fullscreen + cutout handling ---
+    private void applyEdgeToEdgeFullscreen() {
+        getWindow().getAttributes().layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+
+        WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        if (controller != null) {
+            controller.hide(WindowInsetsCompat.Type.systemBars());
+            controller.setSystemBarsBehavior(
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        }
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) {
+            applyEdgeToEdgeFullscreen();
+        }
+    }
+
+    @Override
+    public void onConfigurationChanged(@NonNull Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        applyEdgeToEdgeFullscreen();
+        if (rootLayout != null) {
+            rootLayout.post(this::applyFixedAspectRatioBox);
+        }
+    }
+
+    // --- Surgical addition: hardcoded 18:9 video box, centered, letterboxed, never stretched ---
+    private void applyFixedAspectRatioBox() {
+        if (rootLayout == null || surfaceView == null) return;
+        int parentW = rootLayout.getWidth();
+        int parentH = rootLayout.getHeight();
+        if (parentW <= 0 || parentH <= 0) return;
+
+        final float targetRatio = 18f / 9f; // width / height, hardcoded, not device-detected
+        int boxW, boxH;
+        if ((float) parentW / (float) parentH > targetRatio) {
+            boxH = parentH;
+            boxW = Math.round(boxH * targetRatio);
+        } else {
+            boxW = parentW;
+            boxH = Math.round(boxW / targetRatio);
+        }
+
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(boxW, boxH);
+        lp.gravity = Gravity.CENTER;
+        surfaceView.setLayoutParams(lp);
+    }
 
     @SuppressLint({"SetJavaScriptEnabled", "RestrictedApi"})
     @Override
@@ -327,6 +404,13 @@ public class MainActivity extends AppCompatActivity {
         surfaceView = findViewById(R.id.surfaceView);
         loadingLayout = findViewById(R.id.loadingLayout);
         loadingText = findViewById(R.id.loadingText);
+
+        // --- Surgical addition: true edge-to-edge fullscreen (hides status/nav bar,
+        // draws under the camera cutout instead of adding a fake black bezel) ---
+        applyEdgeToEdgeFullscreen();
+
+        // --- Surgical addition: hardcoded 18:9 video box, centered, no stretching ---
+        rootLayout.post(this::applyFixedAspectRatioBox);
 
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
