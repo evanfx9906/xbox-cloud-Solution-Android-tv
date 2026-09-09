@@ -246,8 +246,10 @@ public class MainActivity extends AppCompatActivity {
 
     // --- Surgical addition: edge-to-edge fullscreen + cutout handling ---
     private void applyEdgeToEdgeFullscreen() {
-        getWindow().getAttributes().layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        WindowManager.LayoutParams attrs = getWindow().getAttributes();
+        attrs.layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        attrs.flags |= WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+        getWindow().setAttributes(attrs);
 
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         WindowInsetsControllerCompat controller =
@@ -271,31 +273,6 @@ public class MainActivity extends AppCompatActivity {
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
         applyEdgeToEdgeFullscreen();
-        if (rootLayout != null) {
-            rootLayout.post(this::applyFixedAspectRatioBox);
-        }
-    }
-
-    // --- Surgical addition: hardcoded 18:9 video box, centered, letterboxed, never stretched ---
-    private void applyFixedAspectRatioBox() {
-        if (rootLayout == null || surfaceView == null) return;
-        int parentW = rootLayout.getWidth();
-        int parentH = rootLayout.getHeight();
-        if (parentW <= 0 || parentH <= 0) return;
-
-        final float targetRatio = 18f / 9f; // width / height, hardcoded, not device-detected
-        int boxW, boxH;
-        if ((float) parentW / (float) parentH > targetRatio) {
-            boxH = parentH;
-            boxW = Math.round(boxH * targetRatio);
-        } else {
-            boxW = parentW;
-            boxH = Math.round(boxW / targetRatio);
-        }
-
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(boxW, boxH);
-        lp.gravity = Gravity.CENTER;
-        surfaceView.setLayoutParams(lp);
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "RestrictedApi"})
@@ -409,9 +386,6 @@ public class MainActivity extends AppCompatActivity {
         // draws under the camera cutout instead of adding a fake black bezel) ---
         applyEdgeToEdgeFullscreen();
 
-        // --- Surgical addition: hardcoded 18:9 video box, centered, no stretching ---
-        rootLayout.post(this::applyFixedAspectRatioBox);
-
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         if (audioManager != null) {
@@ -462,6 +436,11 @@ public class MainActivity extends AppCompatActivity {
         surfaceView.setKeepScreenOn(true);
         surfaceView.setEnableHardwareScaler(true);
         surfaceView.setScalingType(RendererCommon.ScalingType.SCALE_ASPECT_FIT);
+        // --- Surgical addition: hardcoded 18:9 stretch, applied as a pure visual transform
+        // (never touches surfaceView's real size/measurement, so setRenderSurface() below
+        // still gets the true, stable surface dimensions -- decoder pipeline is untouched).
+        // Xbox always renders at a fixed 16:9, so this ratio is a constant: 18/16 = 1.125.
+        surfaceView.setScaleX(1.125f);
 
         Surface s = surfaceView.getHolder().getSurface();
         if (s == null || !s.isValid()) return;
