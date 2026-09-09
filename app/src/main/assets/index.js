@@ -305,6 +305,10 @@ class XcloudInterceptor {
             const body = await request.clone().json();
             if (body.settings) {
                 body.settings.osName = osName;
+                // Surgical addition: force English, mirroring Better xCloud's
+                // "preferred game language" override (body.settings.locale) on this
+                // exact same session-creation request.
+                body.settings.locale = "en-US";
             }
             // Create a new request with the modified body
             finalRequest = new Request(request, {
