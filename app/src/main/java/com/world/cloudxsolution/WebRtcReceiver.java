@@ -294,6 +294,7 @@ private boolean showStats=false;
 
                 @Override
                 public void onIceConnectionChange(PeerConnection.IceConnectionState state) {
+                    DiagnosticLog.log("stream", "ice_connection_state", String.valueOf(state));
                     if (signalingListener != null) signalingListener.onIceConnectionChange(state);
                     if (state == PeerConnection.IceConnectionState.CONNECTED && !codecLogged) {
                         codecLogged = true;
@@ -602,6 +603,7 @@ private boolean showStats=false;
                 });
             } catch (Exception e) {
                 Log.e(TAG, "Failed to collect live stats", e);
+                DiagnosticLog.logException("stream", "getStats_fail", e);
             }
         }
     }
