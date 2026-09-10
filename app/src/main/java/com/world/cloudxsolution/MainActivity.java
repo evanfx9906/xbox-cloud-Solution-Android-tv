@@ -8,6 +8,13 @@ import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
+import android.view.ViewTreeObserver;
+import android.widget.Toast;
+import androidx.core.content.FileProvider;
+import java.io.File;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
@@ -244,6 +251,44 @@ public class MainActivity extends AppCompatActivity {
         }
     };
 
+    // --- Surgical addition: share the diagnostic logs via the OS share sheet.
+    // Purely a convenience -- the files are already visible in Downloads/CloudXDiagnostics
+    // regardless of whether this button is ever used. Read-only, never touches
+    // rendering/layout state.
+    private void exportDiagnosticLog() {
+        try {
+            java.util.ArrayList<Uri> uris = new java.util.ArrayList<>();
+            android.content.ContentResolver resolver = getContentResolver();
+            String[] projection = { android.provider.MediaStore.Downloads._ID };
+            String selection = android.provider.MediaStore.Downloads.DISPLAY_NAME + " LIKE ?";
+            String[] selectionArgs = { "cloudx_diag_%" };
+            try (android.database.Cursor cursor = resolver.query(
+                    android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    projection, selection, selectionArgs, null)) {
+                if (cursor != null) {
+                    int idCol = cursor.getColumnIndexOrThrow(android.provider.MediaStore.Downloads._ID);
+                    while (cursor.moveToNext()) {
+                        long id = cursor.getLong(idCol);
+                        uris.add(android.content.ContentUris.withAppendedId(
+                                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, id));
+                    }
+                }
+            }
+            if (uris.isEmpty()) {
+                Toast.makeText(this, "No diagnostic log found yet -- check Downloads/CloudXDiagnostics", Toast.LENGTH_LONG).show();
+                return;
+            }
+            Intent shareIntent = new Intent(Intent.ACTION_SEND_MULTIPLE);
+            shareIntent.setType("application/json");
+            shareIntent.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+            shareIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(shareIntent, "Share CloudX diagnostic logs"));
+        } catch (Exception e) {
+            Log.e(TAG, "exportDiagnosticLog failed", e);
+            Toast.makeText(this, "Diagnostic export failed: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
     // --- Surgical addition: edge-to-edge fullscreen + cutout handling ---
     private void applyEdgeToEdgeFullscreen() {
         WindowManager.LayoutParams attrs = getWindow().getAttributes();
@@ -272,37 +317,16 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
+        DiagnosticLog.log("main", "onConfigurationChanged", "fired");
         applyEdgeToEdgeFullscreen();
-    }
-
-    // --- Surgical addition: hardcoded 18:9 video box, centered, letterboxed, never stretched.
-    // Applied ONCE, before login/streaming ever starts, and never again -- so the surface is
-    // already stable at its final size by the time setRenderSurface() reads its dimensions,
-    // and no resize/surfaceChanged() event can occur while a stream is active.
-    private void applyFixedAspectRatioBoxOnce() {
-        if (rootLayout == null || surfaceView == null) return;
-        int parentW = rootLayout.getWidth();
-        int parentH = rootLayout.getHeight();
-        if (parentW <= 0 || parentH <= 0) return;
-
-        final float targetRatio = 18f / 9f; // width / height, hardcoded, not device-detected
-        int boxW, boxH;
-        if ((float) parentW / (float) parentH > targetRatio) {
-            boxH = parentH;
-            boxW = Math.round(boxH * targetRatio);
-        } else {
-            boxW = parentW;
-            boxH = Math.round(boxW / targetRatio);
-        }
-
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(boxW, boxH);
-        lp.gravity = Gravity.CENTER;
-        surfaceView.setLayoutParams(lp);
     }
 
     @SuppressLint({"SetJavaScriptEnabled", "RestrictedApi"})
     @Override
     protected void onCreate(Bundle savedInstanceState) {
+        DiagnosticLog.installUncaughtExceptionHandler("main");
+        DiagnosticLog.init(this, "main");
+        DiagnosticLog.logDeviceInfo(this, "main");
         SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
@@ -411,8 +435,29 @@ public class MainActivity extends AppCompatActivity {
         // draws under the camera cutout instead of adding a fake black bezel) ---
         applyEdgeToEdgeFullscreen();
 
-        // --- Surgical addition: hardcoded 18:9 box, set once before anything streams ---
-        rootLayout.post(this::applyFixedAspectRatioBoxOnce);
+        // --- Surgical addition: one-time, read-only layout dimension logging.
+        // This ONLY observes -- it never sets any size, so it carries none of the
+        // risk the earlier aspect-ratio attempts did.
+        rootLayout.getViewTreeObserver().addOnGlobalLayoutListener(new ViewTreeObserver.OnGlobalLayoutListener() {
+            @Override
+            public void onGlobalLayout() {
+                DiagnosticLog.log("main", "global_layout",
+                        "rootLayout=" + rootLayout.getWidth() + "x" + rootLayout.getHeight()
+                                + " surfaceView=" + surfaceView.getWidth() + "x" + surfaceView.getHeight());
+                rootLayout.getViewTreeObserver().removeOnGlobalLayoutListener(this);
+            }
+        });
+
+        // --- Surgical addition: periodic memory snapshot for diagnostics, every 3s.
+        final Handler diagHandler = new Handler(Looper.getMainLooper());
+        final Runnable memSnapshot = new Runnable() {
+            @Override
+            public void run() {
+                DiagnosticLog.logMemory("main");
+                diagHandler.postDelayed(this, 3000);
+            }
+        };
+        diagHandler.postDelayed(memSnapshot, 3000);
 
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -421,9 +466,16 @@ public class MainActivity extends AppCompatActivity {
         }
 
         surfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
-            @Override public void surfaceCreated(SurfaceHolder holder) { pushSurfaceIfReady(); }
-            @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) { pushSurfaceIfReady(); }
+            @Override public void surfaceCreated(SurfaceHolder holder) {
+                DiagnosticLog.log("main", "surfaceCreated", "fired");
+                pushSurfaceIfReady();
+            }
+            @Override public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+                DiagnosticLog.log("main", "surfaceChanged", "w=" + w + " h=" + h + " format=" + format);
+                pushSurfaceIfReady();
+            }
             @Override public void surfaceDestroyed(SurfaceHolder holder) {
+                DiagnosticLog.log("main", "surfaceDestroyed", "fired");
                 if (streamingService != null) {
                     try { streamingService.clearRenderSurface(); } catch (RemoteException ignored) {}
                 }
@@ -467,8 +519,13 @@ public class MainActivity extends AppCompatActivity {
 
         Surface s = surfaceView.getHolder().getSurface();
         if (s == null || !s.isValid()) return;
+        DiagnosticLog.log("main", "pushSurfaceIfReady",
+                "surfaceView=" + surfaceView.getWidth() + "x" + surfaceView.getHeight());
         try { streamingService.setRenderSurface(s, surfaceView.getWidth(), surfaceView.getHeight()); }
-        catch (RemoteException e) { Log.e(TAG, "setRenderSurface", e); }
+        catch (RemoteException e) {
+            Log.e(TAG, "setRenderSurface", e);
+            DiagnosticLog.logException("main", "pushSurfaceIfReady_fail", e);
+        }
     }
     private void showIntroHelpDialog() {
         android.content.SharedPreferences prefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
@@ -971,6 +1028,7 @@ private boolean debug=false;
 
     @Override
     protected void onDestroy() {
+        DiagnosticLog.log("main", "onDestroy", "fired");
         if (performanceDialog != null) {
             performanceDialog.dismiss();
             performanceDialog = null;
@@ -1055,6 +1113,8 @@ private boolean debug=false;
         Button btnNexus = dialog.findViewById(R.id.btn_open_nexus);
         Button btnMic = dialog.findViewById(R.id.btn_mic_toggle);
         Button btnClose = dialog.findViewById(R.id.btn_close_dialog);
+        Button btnExportDiagLog = dialog.findViewById(R.id.btn_export_diag_log);
+        btnExportDiagLog.setOnClickListener(v -> exportDiagnosticLog());
         if(!isStreaming()){
             btnExit.setVisibility(View.GONE);
             btnPerformanceToggle.setVisibility(View.GONE);
