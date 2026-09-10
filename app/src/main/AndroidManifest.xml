@@ -70,6 +70,7 @@
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout"
             android:launchMode="singleTask"
             android:hardwareAccelerated="true"
+            android:screenOrientation="landscape"
             android:theme="@style/Theme.App.Starting"
             >
             <meta-data android:name="android.media.codec.low_latency" android:value="1"/>
