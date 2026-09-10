@@ -67,11 +67,24 @@ public class StreamingService extends Service implements StreamHost {
     @Override
     public void onCreate() {
         super.onCreate();
+        DiagnosticLog.installUncaughtExceptionHandler("stream");
+        DiagnosticLog.init(this, "stream");
+        DiagnosticLog.logDeviceInfo(this, "stream");
         callbackHandler = new Handler(Looper.getMainLooper());
         startForegroundWithNotification();
         webRtcReceiver = new WebRtcReceiver(this /* StreamHost */);
         setupSignalingRelay();
         setupNetworkBinding();
+
+        // Surgical addition: periodic memory snapshot for diagnostics, every 3s.
+        final Runnable memSnapshot = new Runnable() {
+            @Override
+            public void run() {
+                DiagnosticLog.logMemory("stream");
+                callbackHandler.postDelayed(this, 3000);
+            }
+        };
+        callbackHandler.postDelayed(memSnapshot, 3000);
     }
 
     private void setupNetworkBinding() {
@@ -180,19 +193,32 @@ public class StreamingService extends Service implements StreamHost {
                     webRtcReceiver.enablePerfStats(false);
                 }
                 Log.e(TAG, "setRenderSurface: Received invalid surface");
+                DiagnosticLog.log("stream", "setRenderSurface_invalid", "w=" + width + " h=" + height);
                 return;
             }
 
-            if (eglRenderer != null) {
-                clearRenderSurface();
+            DiagnosticLog.log("stream", "setRenderSurface_called",
+                    "w=" + width + " h=" + height + " thread=" + Thread.currentThread().getName()
+                            + " eglRendererAlreadyExists=" + (eglRenderer != null));
+
+            try {
+                if (eglRenderer != null) {
+                    DiagnosticLog.log("stream", "setRenderSurface_teardown",
+                            "tearing down existing eglRenderer before recreating");
+                    clearRenderSurface();
+                }
+                if (serviceEglBase == null) {
+                    serviceEglBase = EglBase.create(webRtcReceiver.getEglBaseContext());
+                }
+                eglRenderer = new org.webrtc.EglRenderer("stream-renderer");
+                eglRenderer.init(serviceEglBase.getEglBaseContext(), EglBase.CONFIG_PLAIN,
+                        new org.webrtc.GlRectDrawer());
+                eglRenderer.createEglSurface(surface);
+                DiagnosticLog.log("stream", "setRenderSurface_created", "w=" + width + " h=" + height);
+            } catch (RuntimeException e) {
+                DiagnosticLog.logException("stream", "setRenderSurface_EXCEPTION", e);
+                throw e;
             }
-            if (serviceEglBase == null) {
-                serviceEglBase = EglBase.create(webRtcReceiver.getEglBaseContext());
-            }
-            eglRenderer = new org.webrtc.EglRenderer("stream-renderer");
-            eglRenderer.init(serviceEglBase.getEglBaseContext(), EglBase.CONFIG_PLAIN,
-                    new org.webrtc.GlRectDrawer());
-            eglRenderer.createEglSurface(surface);
 
             org.webrtc.VideoSink wrapperSink = new org.webrtc.VideoSink() {
                 private boolean firstFrameSeen = false;
@@ -201,6 +227,8 @@ public class StreamingService extends Service implements StreamHost {
                     if (!firstFrameSeen) {
                         firstFrameSeen = true;
                         Log.i(TAG, "First frame detected in service! " + frame.getRotatedWidth() + "x" + frame.getRotatedHeight());
+                        DiagnosticLog.log("stream", "first_frame",
+                                frame.getRotatedWidth() + "x" + frame.getRotatedHeight());
                         onFirstFrameRendered(frame.getRotatedWidth(), frame.getRotatedHeight());
                     }
                     if (eglRenderer != null) {
@@ -218,6 +246,8 @@ public class StreamingService extends Service implements StreamHost {
 
         @Override
         public void clearRenderSurface() {
+            DiagnosticLog.log("stream", "clearRenderSurface_called",
+                    "thread=" + Thread.currentThread().getName() + " eglRendererExists=" + (eglRenderer != null));
             if (eglRenderer != null) {
                 VideoTrack remoteTrack = webRtcReceiver.getRemoteVideoTrack();
                 // Note: we can't easily remove the anonymous wrapperSink here
