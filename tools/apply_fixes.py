@@ -163,4 +163,73 @@ edit("app/src/main/res/values/strings.xml",
      '<string name="app_name">cloudxSolution Fixed</string>',
      "app label 'cloudxSolution Fixed'")
 
+
+# ---- 5. Rotation: follow the phone's sensor ----------------------------------
+# Per Android's manifest docs, "sensor" follows the orientation sensor even when
+# the phone's auto-rotate toggle is off. Use "fullUser" instead to obey the toggle.
+edit("app/src/main/AndroidManifest.xml",
+     '            android:launchMode="singleTask"\n',
+     '            android:launchMode="singleTask"\n'
+     '            android:screenOrientation="sensor"\n',
+     "rotate with the phone sensor")
+
+# ---- 6. TEMPORARY diagnostics (read-only, change no behaviour) ---------------
+DIAG_HELPERS = r'''    // ---- Temporary diagnostics (added by apply_fixes.py) ----
+    private int diagPageCount = 0;
+    private boolean diagSettingsShown = false;
+
+    private void showDiagnostic(String title, String raw) {
+        String msg = raw == null ? "null" : raw.replaceAll("^\"|\"$", "").replace(" | ", "\n");
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(msg)
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
+'''
+edit(JAVA,
+     "private boolean debug=false;\n    public void showCustomToast",
+     DIAG_HELPERS + "private boolean debug=false;\n    public void showCustomToast",
+     "diagnostic helper")
+
+DIAG_PAGE = r'''super.onPageFinished(view, url);
+                if (diagPageCount < 2 && url != null && url.contains("xbox.com")) {
+                    diagPageCount++;
+                    view.evaluateJavascript(
+                            "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
+                            value -> showDiagnostic("Language diagnostic " + diagPageCount + "/2", value));
+                }
+'''
+edit(JAVA,
+     "super.onPageFinished(view, url);\n",
+     DIAG_PAGE,
+     "language diagnostic on page load")
+
+edit(JAVA,
+     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnApply.requestFocus();\n",
+     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnApply.requestFocus();\n"
+     "        if (!diagSettingsShown) {\n"
+     "            diagSettingsShown = true;\n"
+     "            dialog.getWindow().getDecorView().postDelayed(() -> {\n"
+     "                View sv = dialog.findViewById(R.id.dialog_scroll);\n"
+     "                if (sv == null) return;\n"
+     "                View child = ((ViewGroup) sv).getChildAt(0);\n"
+     "                showDiagnostic(\"Settings dialog diagnostic\",\n"
+     "                        \"screen height px: \" + getResources().getDisplayMetrics().heightPixels\n"
+     "                        + \" | window height px: \" + dialog.getWindow().getDecorView().getHeight()\n"
+     "                        + \" | scroll area height px: \" + sv.getHeight()\n"
+     "                        + \" | content height px: \" + (child == null ? -1 : child.getHeight())\n"
+     "                        + \" | can scroll down: \" + sv.canScrollVertically(1)\n"
+     "                        + \" | can scroll up: \" + sv.canScrollVertically(-1)\n"
+     "                        + \" | orientation (1=portrait, 2=landscape): \" + getResources().getConfiguration().orientation);\n"
+     "            }, 500);\n"
+     "        }\n",
+     "settings dialog scroll diagnostic")
+
+edit(LAYOUT + "dialog_app_settings.xml",
+     '<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"\n    android:layout_width="340dp"',
+     '<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"\n    android:id="@+id/dialog_scroll"\n    android:layout_width="340dp"',
+     "id on app settings scroll view")
+
 print("\nDone." if changed else "\nNothing to change.")
