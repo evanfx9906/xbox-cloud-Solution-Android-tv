@@ -69,9 +69,8 @@
             android:exported="true"
             android:configChanges="orientation|screenSize|keyboard|keyboardHidden|screenLayout"
             android:launchMode="singleTask"
-            android:screenOrientation="sensor"
             android:hardwareAccelerated="true"
-            android:screenOrientation="landscape"
+            android:screenOrientation="sensor"
             android:theme="@style/Theme.App.Starting"
             >
             <meta-data android:name="android.media.codec.low_latency" android:value="1"/>
