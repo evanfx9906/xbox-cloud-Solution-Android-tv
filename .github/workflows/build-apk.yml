@@ -17,20 +17,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Rebuild the edited files from a clean base, then apply fixes
+      - name: Reset edited files to the clean base, then apply fixes
         run: |
-          # The 7 files below are generated: clean base (72dc66f = your fork on Oct 3,
-          # before any script ran) + the edits in tools/apply_fixes.py. This makes every
-          # build start from the same known state, so results never stack up.
-          git checkout 72dc66f -- \
-            app/src/main/AndroidManifest.xml \
-            app/src/main/java/com/world/cloudxsolution/MainActivity.java \
-            app/src/main/res/layout/dialog_app_settings.xml \
-            app/src/main/res/layout/dialog_streaming_menu.xml \
-            app/src/main/res/layout/dialog_intro_help.xml \
-            app/build.gradle.kts \
-            app/src/main/res/values/strings.xml
-          python3 tools/apply_fixes.py
+          # tools/apply_fixes.py --reset restores the files it edits to the clean base
+          # commit and re-applies every edit, so each build starts from the same state.
+          python3 tools/apply_fixes.py --reset
           git add app
           if ! git diff --cached --quiet -- app; then
             git config user.name "github-actions"
