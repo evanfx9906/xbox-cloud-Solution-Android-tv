@@ -58,6 +58,9 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.appcompat.view.WindowCallbackWrapper;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import androidx.core.splashscreen.SplashScreen;
 import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
@@ -330,6 +333,7 @@ public class MainActivity extends AppCompatActivity {
         SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        applyImmersiveMode(getWindow());
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -509,6 +513,35 @@ public class MainActivity extends AppCompatActivity {
 
         showIntroHelpDialog();
     }
+    // ---- Fullscreen helpers (added by apply_fixes.py) ----
+    private static void hideSystemBars(android.view.Window window) {
+        if (window == null) return;
+        WindowInsetsControllerCompat controller =
+                WindowCompat.getInsetsController(window, window.getDecorView());
+        controller.setSystemBarsBehavior(
+                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+        controller.hide(WindowInsetsCompat.Type.systemBars());
+    }
+
+    private static void applyImmersiveMode(android.view.Window window) {
+        if (window == null) return;
+        // Keep the screen awake for as long as this window is shown.
+        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        // Draw edge to edge, including behind the camera cutout, in both orientations.
+        WindowCompat.setDecorFitsSystemWindows(window, false);
+        WindowManager.LayoutParams lp = window.getAttributes();
+        lp.layoutInDisplayCutoutMode =
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
+        window.setAttributes(lp);
+        hideSystemBars(window);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) hideSystemBars(getWindow());
+    }
+
     private void pushSurfaceIfReady() {
         if (streamingService == null) return;
         surfaceView.disableFpsReduction();
@@ -544,6 +577,7 @@ public class MainActivity extends AppCompatActivity {
             dialog.dismiss();
         });
 
+        hideSystemBars(dialog.getWindow());
         dialog.show();
         btnOk.requestFocus();
     }
@@ -588,6 +622,12 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                if (diagPageCount < 2 && url != null && url.contains("xbox.com")) {
+                    diagPageCount++;
+                    view.evaluateJavascript(
+                            "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
+                            value -> showDiagnostic("Language diagnostic " + diagPageCount + "/2", value));
+                }
                 setWebviewVisible();
 
                 // Inject viewport meta tag to force fit
@@ -649,6 +689,19 @@ public class MainActivity extends AppCompatActivity {
             performanceDialog.dismiss();
         }
     }
+    // ---- Temporary diagnostics (added by apply_fixes.py) ----
+    private int diagPageCount = 0;
+    private boolean diagSettingsShown = false;
+
+    private void showDiagnostic(String title, String raw) {
+        String msg = raw == null ? "null" : raw.replaceAll("^\"|\"$", "").replace(" | ", "\n");
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle(title)
+                .setMessage(msg)
+                .setPositiveButton("OK", null)
+                .show();
+    }
+
 private boolean debug=false;
     public void showCustomToast(final String message) {
         runOnUiThread(() -> {
@@ -710,7 +763,7 @@ private boolean debug=false;
                     webView.restoreState(webViewState);
                     if(webView.canGoBack()){webView.goBack();}
                 } else {
-                    webView.loadUrl("https://www.xbox.com/fr-FR/play");
+                    webView.loadUrl("https://www.xbox.com/en-US/play");
                 }
             }
             webView.setVisibility(WebView.VISIBLE);
@@ -1017,6 +1070,7 @@ private boolean debug=false;
             dialog.dismiss();
         });
 
+        hideSystemBars(dialog.getWindow());
         dialog.show();
         btnSubmit.requestFocus();
     }
@@ -1223,6 +1277,7 @@ private boolean debug=false;
 
         btnClose.setOnClickListener(v -> dialog.dismiss());
 
+        hideSystemBars(dialog.getWindow());
         dialog.show();
         btnExit.requestFocus();
     }
@@ -1449,6 +1504,7 @@ private boolean debug=false;
     private void showSettingsDialog() {
         CXdialoge dialog = new CXdialoge(this);
         dialog.show();
+        hideSystemBars(dialog.getWindow());
     }
 
     private void showAppSettingsDialog() {
@@ -1586,7 +1642,24 @@ private boolean debug=false;
             dialog.dismiss();
         });
 
+        hideSystemBars(dialog.getWindow());
         dialog.show();
         btnApply.requestFocus();
+        if (!diagSettingsShown) {
+            diagSettingsShown = true;
+            dialog.getWindow().getDecorView().postDelayed(() -> {
+                View sv = dialog.findViewById(R.id.dialog_scroll);
+                if (sv == null) return;
+                View child = ((ViewGroup) sv).getChildAt(0);
+                showDiagnostic("Settings dialog diagnostic",
+                        "screen height px: " + getResources().getDisplayMetrics().heightPixels
+                        + " | window height px: " + dialog.getWindow().getDecorView().getHeight()
+                        + " | scroll area height px: " + sv.getHeight()
+                        + " | content height px: " + (child == null ? -1 : child.getHeight())
+                        + " | can scroll down: " + sv.canScrollVertically(1)
+                        + " | can scroll up: " + sv.canScrollVertically(-1)
+                        + " | orientation (1=portrait, 2=landscape): " + getResources().getConfiguration().orientation);
+            }, 500);
+        }
     }
 }
