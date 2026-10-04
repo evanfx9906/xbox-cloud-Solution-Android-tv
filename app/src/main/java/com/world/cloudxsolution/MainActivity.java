@@ -592,13 +592,39 @@ public class MainActivity extends AppCompatActivity {
                 final String info = "didCrash=" + detail.didCrash()
                         + " (false = killed by the system, usually low memory)";
                 DiagnosticLog.log("main", "RENDER_PROCESS_GONE", info);
-                runOnUiThread(() -> showDiagnostic("Build v5 - WebView process died", info));
+                runOnUiThread(() -> showDiagnostic("Build v6 - WebView process died", info));
                 return true;
+            }
+
+            @Override
+            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse errorResponse) {
+                try {
+                    if (diagNetLogCount < 80) {
+                        diagNetLogCount++;
+                        DiagnosticLog.log("main", "http_error", errorResponse.getStatusCode() + " " + request.getMethod() + " " + request.getUrl()
+                                + (request.isForMainFrame() ? " (main frame)" : ""));
+                    }
+                } catch (Throwable ignored) {
+                }
+            }
+
+            @Override
+            public void onReceivedError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceError error) {
+                try {
+                    if (diagNetLogCount < 80) {
+                        diagNetLogCount++;
+                        DiagnosticLog.log("main", "load_error", error.getErrorCode() + " " + error.getDescription() + " " + request.getUrl()
+                                + (request.isForMainFrame() ? " (main frame)" : ""));
+                    }
+                } catch (Throwable ignored) {
+                }
             }
 
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                DiagnosticLog.log("main", "page_finished", url + " | textZoom=" + view.getSettings().getTextZoom()
+                        + " | ua=" + view.getSettings().getUserAgentString());
                 setWebviewVisible();
 
                 // Inject viewport meta tag to force fit
@@ -639,6 +665,7 @@ public class MainActivity extends AppCompatActivity {
                 view.setVisibility(WebView.GONE);
                 super.onPageStarted(view, url, favicon);
                 Log.i(TAG, "Page started: " + url);
+                DiagnosticLog.log("main", "page_started", String.valueOf(url));
                 if (webView != null && webView.getWebChromeClient() instanceof CustomWebChromeClient) {
                     ((CustomWebChromeClient) webView.getWebChromeClient()).resetInjection();
                 }
@@ -661,6 +688,26 @@ public class MainActivity extends AppCompatActivity {
         }
     }
     // ---- Crash diagnostics (added by apply_fixes.py) ----
+    private int diagNetLogCount = 0;
+    private int diagConsoleCount = 0;
+
+    private void diagConsole(ConsoleMessage m) {
+        try {
+            String msg = m.message();
+            if (msg == null) return;
+            boolean interesting = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
+                    || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING
+                    || msg.contains("Bx")
+                    || msg.contains("Unsupported")
+                    || msg.toLowerCase(java.util.Locale.ROOT).contains("reload");
+            if (!interesting || diagConsoleCount >= 150) return;
+            diagConsoleCount++;
+            String shown = msg.length() > 300 ? msg.substring(0, 300) : msg;
+            DiagnosticLog.log("main", "console_" + m.messageLevel(), shown + " @" + m.sourceId() + ":" + m.lineNumber());
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void showDiagnostic(String title, String text) {
         new androidx.appcompat.app.AlertDialog.Builder(this)
                 .setTitle(title)
@@ -705,7 +752,7 @@ public class MainActivity extends AppCompatActivity {
             }
             String text = sb.toString().trim();
             DiagnosticLog.log("main", "previous_exits", text);
-            showDiagnostic("Build v5 - how the app last stopped", text);
+            showDiagnostic("Build v6 - how the app last stopped", text);
         } catch (Throwable t) {
             DiagnosticLog.logException("main", "exit_info_fail", t);
         }
@@ -823,6 +870,7 @@ private boolean debug=false;
 // called webRtcReceiver.setSignalingListener(null)/createPeerConnection(finalServers)/setupSignalingListener()):
 
     public void onPeerConnectionConfigReceived(String configJson) {
+        DiagnosticLog.log("main", "handover_peer_config", "received, length=" + (configJson == null ? -1 : configJson.length()));
         if (configJson == null || configJson.equals("null") || configJson.isEmpty()) {
             return;
         }
@@ -1148,6 +1196,7 @@ private boolean debug=false;
         @Override
         public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
             Log.d(TAG, "WebView Console: " + consoleMessage.message());
+            diagConsole(consoleMessage);
             return true;
         }
     }
