@@ -330,6 +330,7 @@ public class MainActivity extends AppCompatActivity {
         SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -586,14 +587,17 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setDatabaseEnabled(true);
         webView.setWebViewClient(new WebViewClient() {
             @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                final String info = "didCrash=" + detail.didCrash()
+                        + " (false = killed by the system, usually low memory)";
+                DiagnosticLog.log("main", "RENDER_PROCESS_GONE", info);
+                runOnUiThread(() -> showDiagnostic("Build v4 - WebView process died", info));
+                return true;
+            }
+
+            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                if (diagPageCount < 2 && url != null && url.contains("xbox.com")) {
-                    diagPageCount++;
-                    view.evaluateJavascript(
-                            "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
-                            value -> showDiagnostic("Build v3 - language check " + diagPageCount + "/2", value));
-                }
                 setWebviewVisible();
 
                 // Inject viewport meta tag to force fit
@@ -655,17 +659,61 @@ public class MainActivity extends AppCompatActivity {
             performanceDialog.dismiss();
         }
     }
-    // ---- Temporary diagnostics (added by apply_fixes.py) ----
-    private int diagPageCount = 0;
-    private boolean diagSettingsShown = false;
-
-    private void showDiagnostic(String title, String raw) {
-        String msg = raw == null ? "null" : raw.replaceAll("^\"|\"$", "").replace(" | ", "\n");
+    // ---- Crash diagnostics (added by apply_fixes.py) ----
+    private void showDiagnostic(String title, String text) {
         new androidx.appcompat.app.AlertDialog.Builder(this)
                 .setTitle(title)
-                .setMessage(msg)
+                .setMessage(text)
                 .setPositiveButton("OK", null)
                 .show();
+    }
+
+    private void diagShowLastExits() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> exits =
+                    am.getHistoricalProcessExitReasons(null, 0, 5);
+            if (exits == null || exits.isEmpty()) return;
+            long now = System.currentTimeMillis();
+            StringBuilder sb = new StringBuilder();
+            for (android.app.ApplicationExitInfo e : exits) {
+                String reason;
+                switch (e.getReason()) {
+                    case android.app.ApplicationExitInfo.REASON_CRASH: reason = "CRASH (Java exception)"; break;
+                    case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE: reason = "CRASH_NATIVE"; break;
+                    case android.app.ApplicationExitInfo.REASON_ANR: reason = "ANR (not responding)"; break;
+                    case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: reason = "LOW_MEMORY (killed by system)"; break;
+                    case android.app.ApplicationExitInfo.REASON_SIGNALED: reason = "SIGNALED (killed)"; break;
+                    case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: reason = "EXCESSIVE_RESOURCE_USAGE"; break;
+                    case android.app.ApplicationExitInfo.REASON_USER_REQUESTED: reason = "USER_REQUESTED"; break;
+                    case android.app.ApplicationExitInfo.REASON_USER_STOPPED: reason = "USER_STOPPED"; break;
+                    case android.app.ApplicationExitInfo.REASON_EXIT_SELF: reason = "EXIT_SELF"; break;
+                    case android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED: reason = "DEPENDENCY_DIED"; break;
+                    case android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE: reason = "PERMISSION_CHANGE"; break;
+                    case android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE: reason = "INITIALIZATION_FAILURE"; break;
+                    case android.app.ApplicationExitInfo.REASON_OTHER: reason = "OTHER"; break;
+                    default: reason = "code " + e.getReason();
+                }
+                sb.append(e.getProcessName()).append(" - ").append(reason)
+                        .append("\n   ").append((now - e.getTimestamp()) / 60000).append(" min ago")
+                        .append(", status ").append(e.getStatus())
+                        .append(", rss ").append(e.getRss() / 1024).append(" MB")
+                        .append("\n   ").append(e.getDescription()).append("\n\n");
+            }
+            String text = sb.toString().trim();
+            DiagnosticLog.log("main", "previous_exits", text);
+            showDiagnostic("Build v4 - how the app last stopped", text);
+        } catch (Throwable t) {
+            DiagnosticLog.logException("main", "exit_info_fail", t);
+        }
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        DiagnosticLog.log("main", "onTrimMemory", "level=" + level);
     }
 
 private boolean debug=false;
@@ -1607,21 +1655,5 @@ private boolean debug=false;
 
         dialog.show();
         btnApply.requestFocus();
-        if (!diagSettingsShown) {
-            diagSettingsShown = true;
-            dialog.getWindow().getDecorView().postDelayed(() -> {
-                View sv = dialog.findViewById(R.id.dialog_scroll);
-                if (sv == null) return;
-                View child = ((ViewGroup) sv).getChildAt(0);
-                showDiagnostic("Build v3 - settings dialog",
-                        "screen height px: " + getResources().getDisplayMetrics().heightPixels
-                        + " | window height px: " + dialog.getWindow().getDecorView().getHeight()
-                        + " | scroll area height px: " + sv.getHeight()
-                        + " | content height px: " + (child == null ? -1 : child.getHeight())
-                        + " | can scroll down: " + sv.canScrollVertically(1)
-                        + " | can scroll up: " + sv.canScrollVertically(-1)
-                        + " | orientation (1=portrait, 2=landscape): " + getResources().getConfiguration().orientation);
-            }, 500);
-        }
     }
 }

@@ -133,6 +133,19 @@ public class DiagnosticLog {
             mem.put("freeMB", rt.freeMemory() / (1024 * 1024));
             mem.put("totalMB", rt.totalMemory() / (1024 * 1024));
             mem.put("maxMB", rt.maxMemory() / (1024 * 1024));
+            try {
+                mem.put("pssMB", android.os.Debug.getPss() / 1024);
+                mem.put("nativeHeapMB", android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024));
+                String[] fds = new java.io.File("/proc/self/fd").list();
+                mem.put("openFds", fds == null ? -1 : fds.length);
+                try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/self/status"))) {
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        if (line.startsWith("Threads:")) mem.put("threads", line.substring(8).trim());
+                    }
+                }
+            } catch (Throwable ignored) {
+            }
             log(process, "memory", mem.toString());
         } catch (Throwable ignored) {
         }
