@@ -331,6 +331,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);
+        StallWatchdog.startMainThreadWatch("main");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -591,7 +592,7 @@ public class MainActivity extends AppCompatActivity {
                 final String info = "didCrash=" + detail.didCrash()
                         + " (false = killed by the system, usually low memory)";
                 DiagnosticLog.log("main", "RENDER_PROCESS_GONE", info);
-                runOnUiThread(() -> showDiagnostic("Build v4 - WebView process died", info));
+                runOnUiThread(() -> showDiagnostic("Build v5 - WebView process died", info));
                 return true;
             }
 
@@ -704,7 +705,7 @@ public class MainActivity extends AppCompatActivity {
             }
             String text = sb.toString().trim();
             DiagnosticLog.log("main", "previous_exits", text);
-            showDiagnostic("Build v4 - how the app last stopped", text);
+            showDiagnostic("Build v5 - how the app last stopped", text);
         } catch (Throwable t) {
             DiagnosticLog.logException("main", "exit_info_fail", t);
         }

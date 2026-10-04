@@ -81,6 +81,7 @@ public class StreamingService extends Service implements StreamHost {
             @Override
             public void run() {
                 DiagnosticLog.logMemory("stream");
+                DiagnosticLog.log("stream", "flow", StallWatchdog.flowSnapshot());
                 callbackHandler.postDelayed(this, 3000);
             }
         };
@@ -231,6 +232,7 @@ public class StreamingService extends Service implements StreamHost {
                                 frame.getRotatedWidth() + "x" + frame.getRotatedHeight());
                         onFirstFrameRendered(frame.getRotatedWidth(), frame.getRotatedHeight());
                     }
+                    StallWatchdog.framesIn.incrementAndGet();
                     if (eglRenderer != null) {
                         eglRenderer.onFrame(frame);
                     }
@@ -256,12 +258,19 @@ public class StreamingService extends Service implements StreamHost {
                 if (remoteTrack != null && webRtcReceiver.getPendingRenderTarget() != null) {
                     remoteTrack.removeSink(webRtcReceiver.getPendingRenderTarget());
                 }
-                eglRenderer.release();
+                final org.webrtc.EglRenderer rendererToRelease = eglRenderer;
                 eglRenderer = null;
+                final EglBase eglBaseToRelease = serviceEglBase;
+                serviceEglBase = null;
+                StallWatchdog.runBounded("stream", "egl_release", 1200, () -> {
+                    rendererToRelease.release();
+                    if (eglBaseToRelease != null) eglBaseToRelease.release();
+                });
             }
             if (serviceEglBase != null) {
-                serviceEglBase.release();
+                final EglBase eglBaseOnly = serviceEglBase;
                 serviceEglBase = null;
+                StallWatchdog.runBounded("stream", "egl_base_release", 1200, () -> eglBaseOnly.release());
             }
         }
 
@@ -305,12 +314,15 @@ public class StreamingService extends Service implements StreamHost {
 
         @Override
         public void closeSession() {
+            DiagnosticLog.log("stream", "closeSession_begin", "thread=" + Thread.currentThread().getName());
             clearRenderSurface();
-            webRtcReceiver.closeSession();
+            StallWatchdog.runBounded("stream", "webrtc_closeSession", 1800, () -> webRtcReceiver.closeSession());
+            DiagnosticLog.log("stream", "closeSession_end", "");
         }
 
         @Override
         public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {
+            StallWatchdog.inputSends.incrementAndGet();
             if (binary != null) {
                // Log.i(TAG, "streamingService send data to: " + label + " (" + binary.length + " bytes)");
                 webRtcReceiver.sendDataChannelMessage(label, binary, isBinary);
@@ -453,6 +465,7 @@ public class StreamingService extends Service implements StreamHost {
 
     @Override
     public void onDataChannelStateChanged(String label, String state) {
+        DiagnosticLog.log("stream", "datachannel_state", label + " = " + state);
         broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));
     }
 
