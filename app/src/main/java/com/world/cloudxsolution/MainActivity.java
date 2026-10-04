@@ -626,6 +626,12 @@ public class MainActivity extends AppCompatActivity {
                     diagPageCount++;
                     view.evaluateJavascript(
                             "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
+                            value -> showDiagnostic("Build v3 - language check " + diagPageCount + "/2", value));
+                }
+                if (diagPageCount < 2 && url != null && url.contains("xbox.com")) {
+                    diagPageCount++;
+                    view.evaluateJavascript(
+                            "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
                             value -> showDiagnostic("Language diagnostic " + diagPageCount + "/2", value));
                 }
                 setWebviewVisible();
@@ -1645,6 +1651,22 @@ private boolean debug=false;
         hideSystemBars(dialog.getWindow());
         dialog.show();
         btnApply.requestFocus();
+        if (!diagSettingsShown) {
+            diagSettingsShown = true;
+            dialog.getWindow().getDecorView().postDelayed(() -> {
+                View sv = dialog.findViewById(R.id.dialog_scroll);
+                if (sv == null) return;
+                View child = ((ViewGroup) sv).getChildAt(0);
+                showDiagnostic("Build v3 - settings dialog",
+                        "screen height px: " + getResources().getDisplayMetrics().heightPixels
+                        + " | window height px: " + dialog.getWindow().getDecorView().getHeight()
+                        + " | scroll area height px: " + sv.getHeight()
+                        + " | content height px: " + (child == null ? -1 : child.getHeight())
+                        + " | can scroll down: " + sv.canScrollVertically(1)
+                        + " | can scroll up: " + sv.canScrollVertically(-1)
+                        + " | orientation (1=portrait, 2=landscape): " + getResources().getConfiguration().orientation);
+            }, 500);
+        }
         if (!diagSettingsShown) {
             diagSettingsShown = true;
             dialog.getWindow().getDecorView().postDelayed(() -> {
