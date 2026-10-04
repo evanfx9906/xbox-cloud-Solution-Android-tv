@@ -1,15 +1,18 @@
 #!/usr/bin/env python3
 """
-Applies a fixed list of edits to the CloudX Android source.
+Edits for the CloudX fork (version v3). Written against the CURRENT source of
+evanfx9906/xbox-cloud-Solution-Android-tv, which already contains the earlier
+fullscreen / cutout / keep-awake code, so none of that is touched here.
 
-Safety rules (zero assumptions):
-  * Every edit looks for exact text. If the text is already changed, it is skipped.
-  * If the original text is not found exactly once, the script STOPS with an error
-    instead of guessing. Nothing is half-applied silently.
+Safety rules:
+  * Each edit needs exact text. Already changed -> skipped.
+  * Original text not found exactly once -> the script STOPS with an error.
   * Running it twice changes nothing the second time.
 """
 import pathlib
 import sys
+
+BUILD_STAMP = "v3"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 JAVA = "app/src/main/java/com/world/cloudxsolution/MainActivity.java"
@@ -31,85 +34,21 @@ def edit(rel, old, new, label):
     print(f"applied: {label}")
 
 
-# ---- 1. Site language: French -> English -------------------------------------
+# ---- 1. Language: the Xbox page URL is hard-coded to French -------------------
 edit(JAVA,
      'webView.loadUrl("https://www.xbox.com/fr-FR/play");',
      'webView.loadUrl("https://www.xbox.com/en-US/play");',
-     "Xbox site language fr-FR -> en-US")
+     "Xbox page language fr-FR -> en-US")
 
-# ---- 2. Fullscreen, camera cutout, keep screen on ----------------------------
-edit(JAVA,
-     "import androidx.core.content.ContextCompat;\n",
-     "import androidx.core.content.ContextCompat;\n"
-     "import androidx.core.view.WindowCompat;\n"
-     "import androidx.core.view.WindowInsetsCompat;\n"
-     "import androidx.core.view.WindowInsetsControllerCompat;\n",
-     "imports for immersive mode")
+# ---- 2. Rotation: the manifest locks the screen to landscape ------------------
+# "sensor" follows the phone's orientation sensor. Use "fullUser" instead if you
+# want it to obey the phone's auto-rotate toggle.
+edit("app/src/main/AndroidManifest.xml",
+     'android:screenOrientation="landscape"',
+     'android:screenOrientation="sensor"',
+     "screen orientation landscape -> sensor")
 
-edit(JAVA,
-     "        setContentView(R.layout.activity_main);\n",
-     "        setContentView(R.layout.activity_main);\n"
-     "        applyImmersiveMode(getWindow());\n",
-     "call immersive mode in onCreate")
-
-HELPERS = '''    // ---- Fullscreen helpers (added by apply_fixes.py) ----
-    private static void hideSystemBars(android.view.Window window) {
-        if (window == null) return;
-        WindowInsetsControllerCompat controller =
-                WindowCompat.getInsetsController(window, window.getDecorView());
-        controller.setSystemBarsBehavior(
-                WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
-        controller.hide(WindowInsetsCompat.Type.systemBars());
-    }
-
-    private static void applyImmersiveMode(android.view.Window window) {
-        if (window == null) return;
-        // Keep the screen awake for as long as this window is shown.
-        window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        // Draw edge to edge, including behind the camera cutout, in both orientations.
-        WindowCompat.setDecorFitsSystemWindows(window, false);
-        WindowManager.LayoutParams lp = window.getAttributes();
-        lp.layoutInDisplayCutoutMode =
-                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        window.setAttributes(lp);
-        hideSystemBars(window);
-    }
-
-    @Override
-    public void onWindowFocusChanged(boolean hasFocus) {
-        super.onWindowFocusChanged(hasFocus);
-        if (hasFocus) hideSystemBars(getWindow());
-    }
-
-'''
-edit(JAVA,
-     "    private void pushSurfaceIfReady() {\n",
-     HELPERS + "    private void pushSurfaceIfReady() {\n",
-     "fullscreen helper methods")
-
-# Dialogs are separate windows, so they need the same bar-hiding call.
-edit(JAVA,
-     "        dialog.show();\n        btnOk.requestFocus();\n",
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnOk.requestFocus();\n",
-     "hide bars on intro dialog")
-edit(JAVA,
-     "        dialog.show();\n        btnSubmit.requestFocus();\n",
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnSubmit.requestFocus();\n",
-     "hide bars on keyboard dialog")
-edit(JAVA,
-     "        dialog.show();\n        btnExit.requestFocus();\n",
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnExit.requestFocus();\n",
-     "hide bars on in-game menu")
-edit(JAVA,
-     "        dialog.show();\n        btnApply.requestFocus();\n",
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnApply.requestFocus();\n",
-     "hide bars on app settings dialog")
-edit(JAVA,
-     "        CXdialoge dialog = new CXdialoge(this);\n        dialog.show();\n",
-     "        CXdialoge dialog = new CXdialoge(this);\n        dialog.show();\n        hideSystemBars(dialog.getWindow());\n",
-     "hide bars on controller settings dialog")
-
-# ---- 3. Landscape: make three dialogs scrollable -----------------------------
+# ---- 3. Landscape: make three dialogs scrollable ------------------------------
 OLD_HEAD = '''<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="340dp"
     android:layout_height="wrap_content"
@@ -117,43 +56,45 @@ OLD_HEAD = '''<LinearLayout xmlns:android="http://schemas.android.com/apk/res/an
     android:background="@drawable/bg_dialog_xbox"
     android:padding="20dp">
 '''
-NEW_HEAD = '''<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="340dp"
-    android:layout_height="wrap_content"
-    android:background="@drawable/bg_dialog_xbox"
-    android:overScrollMode="ifContentScrolls">
-
-<LinearLayout
-    android:layout_width="match_parent"
-    android:layout_height="wrap_content"
-    android:orientation="vertical"
-    android:padding="20dp">
-'''
 
 
-def wrap_in_scroll(name):
-    rel = LAYOUT + name
-    p = ROOT / rel
+def new_head(with_id):
+    id_line = '    android:id="@+id/dialog_scroll"\n' if with_id else ""
+    return ('<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"\n'
+            + id_line +
+            '    android:layout_width="340dp"\n'
+            '    android:layout_height="wrap_content"\n'
+            '    android:background="@drawable/bg_dialog_xbox"\n'
+            '    android:overScrollMode="ifContentScrolls">\n'
+            '\n'
+            '<LinearLayout\n'
+            '    android:layout_width="match_parent"\n'
+            '    android:layout_height="wrap_content"\n'
+            '    android:orientation="vertical"\n'
+            '    android:padding="20dp">\n')
+
+
+def wrap_in_scroll(name, with_id=False):
+    p = ROOT / (LAYOUT + name)
     text = p.read_text(encoding="utf-8")
     if "<ScrollView xmlns:android" in text:
         print(f"skip (already applied): scroll wrapper {name}")
         return
     if text.count(OLD_HEAD) != 1:
         sys.exit(f"ERROR [scroll {name}]: root tag not found exactly once")
-    body = text.replace(OLD_HEAD, NEW_HEAD, 1)
-    stripped = body.rstrip()
-    if not stripped.endswith("</LinearLayout>"):
+    body = text.replace(OLD_HEAD, new_head(with_id), 1).rstrip()
+    if not body.endswith("</LinearLayout>"):
         sys.exit(f"ERROR [scroll {name}]: file does not end with </LinearLayout>")
-    body = stripped + "\n</ScrollView>\n"
-    p.write_text(body, encoding="utf-8")
+    p.write_text(body + "\n</ScrollView>\n", encoding="utf-8")
     changed.append(f"scroll wrapper {name}")
     print(f"applied: scroll wrapper {name}")
 
 
-for layout in ("dialog_app_settings.xml", "dialog_streaming_menu.xml", "dialog_intro_help.xml"):
-    wrap_in_scroll(layout)
+wrap_in_scroll("dialog_app_settings.xml", with_id=True)
+wrap_in_scroll("dialog_streaming_menu.xml")
+wrap_in_scroll("dialog_intro_help.xml")
 
-# ---- 4. Install next to the original app instead of replacing it -------------
+# ---- 4. Install next to your current app instead of replacing it --------------
 edit("app/build.gradle.kts",
      "    buildTypes {\n        release {\n",
      "    buildTypes {\n        debug {\n            applicationIdSuffix = \".fixed\"\n        }\n        release {\n",
@@ -163,23 +104,13 @@ edit("app/src/main/res/values/strings.xml",
      '<string name="app_name">cloudxSolution Fixed</string>',
      "app label 'cloudxSolution Fixed'")
 
-
-# ---- 5. Rotation: follow the phone's sensor ----------------------------------
-# Per Android's manifest docs, "sensor" follows the orientation sensor even when
-# the phone's auto-rotate toggle is off. Use "fullUser" instead to obey the toggle.
-edit("app/src/main/AndroidManifest.xml",
-     '            android:launchMode="singleTask"\n',
-     '            android:launchMode="singleTask"\n'
-     '            android:screenOrientation="sensor"\n',
-     "rotate with the phone sensor")
-
-# ---- 6. TEMPORARY diagnostics (read-only, change no behaviour) ---------------
-DIAG_HELPERS = r'''    // ---- Temporary diagnostics (added by apply_fixes.py) ----
+# ---- 5. TEMPORARY read-only diagnostics (change no behaviour) -----------------
+DIAG_HELPERS = '''    // ---- Temporary diagnostics (added by apply_fixes.py) ----
     private int diagPageCount = 0;
     private boolean diagSettingsShown = false;
 
     private void showDiagnostic(String title, String raw) {
-        String msg = raw == null ? "null" : raw.replaceAll("^\"|\"$", "").replace(" | ", "\n");
+        String msg = raw == null ? "null" : raw.replaceAll("^\\"|\\"$", "").replace(" | ", "\\n");
         new androidx.appcompat.app.AlertDialog.Builder(this)
                 .setTitle(title)
                 .setMessage(msg)
@@ -193,12 +124,12 @@ edit(JAVA,
      DIAG_HELPERS + "private boolean debug=false;\n    public void showCustomToast",
      "diagnostic helper")
 
-DIAG_PAGE = r'''super.onPageFinished(view, url);
+DIAG_PAGE = '''super.onPageFinished(view, url);
                 if (diagPageCount < 2 && url != null && url.contains("xbox.com")) {
                     diagPageCount++;
                     view.evaluateJavascript(
                             "(function(){return 'URL: ' + location.href + ' | navigator.language: ' + navigator.language + ' | page lang attribute: ' + document.documentElement.lang;})()",
-                            value -> showDiagnostic("Language diagnostic " + diagPageCount + "/2", value));
+                            value -> showDiagnostic("Build ''' + BUILD_STAMP + ''' - language check " + diagPageCount + "/2", value));
                 }
 '''
 edit(JAVA,
@@ -207,15 +138,15 @@ edit(JAVA,
      "language diagnostic on page load")
 
 edit(JAVA,
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnApply.requestFocus();\n",
-     "        hideSystemBars(dialog.getWindow());\n        dialog.show();\n        btnApply.requestFocus();\n"
+     "        dialog.show();\n        btnApply.requestFocus();\n",
+     "        dialog.show();\n        btnApply.requestFocus();\n"
      "        if (!diagSettingsShown) {\n"
      "            diagSettingsShown = true;\n"
      "            dialog.getWindow().getDecorView().postDelayed(() -> {\n"
      "                View sv = dialog.findViewById(R.id.dialog_scroll);\n"
      "                if (sv == null) return;\n"
      "                View child = ((ViewGroup) sv).getChildAt(0);\n"
-     "                showDiagnostic(\"Settings dialog diagnostic\",\n"
+     "                showDiagnostic(\"Build " + BUILD_STAMP + " - settings dialog\",\n"
      "                        \"screen height px: \" + getResources().getDisplayMetrics().heightPixels\n"
      "                        + \" | window height px: \" + dialog.getWindow().getDecorView().getHeight()\n"
      "                        + \" | scroll area height px: \" + sv.getHeight()\n"
@@ -226,10 +157,5 @@ edit(JAVA,
      "            }, 500);\n"
      "        }\n",
      "settings dialog scroll diagnostic")
-
-edit(LAYOUT + "dialog_app_settings.xml",
-     '<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"\n    android:layout_width="340dp"',
-     '<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"\n    android:id="@+id/dialog_scroll"\n    android:layout_width="340dp"',
-     "id on app settings scroll view")
 
 print("\nDone." if changed else "\nNothing to change.")
