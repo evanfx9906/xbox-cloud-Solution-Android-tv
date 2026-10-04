@@ -12,16 +12,29 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the repository
+      - name: Check out the repository (full history)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Apply fixes (safe to repeat)
+      - name: Rebuild the edited files from a clean base, then apply fixes
         run: |
+          # The 7 files below are generated: clean base (72dc66f = your fork on Oct 3,
+          # before any script ran) + the edits in tools/apply_fixes.py. This makes every
+          # build start from the same known state, so results never stack up.
+          git checkout 72dc66f -- \
+            app/src/main/AndroidManifest.xml \
+            app/src/main/java/com/world/cloudxsolution/MainActivity.java \
+            app/src/main/res/layout/dialog_app_settings.xml \
+            app/src/main/res/layout/dialog_streaming_menu.xml \
+            app/src/main/res/layout/dialog_intro_help.xml \
+            app/build.gradle.kts \
+            app/src/main/res/values/strings.xml
           python3 tools/apply_fixes.py
-          if [ -n "$(git status --porcelain app)" ]; then
+          git add app
+          if ! git diff --cached --quiet -- app; then
             git config user.name "github-actions"
             git config user.email "github-actions@users.noreply.github.com"
-            git add app
             git commit -m "Apply fixes via tools/apply_fixes.py"
             git push
           fi
