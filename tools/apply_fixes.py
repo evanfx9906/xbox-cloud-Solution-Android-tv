@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Edits for the CloudX fork (version v5).
+Edits for the CloudX fork (version v6).
 
 Base = commit 72dc66f (your fork on Oct 3, before any script ran).
 Run with --reset (the workflow does) and the OWNED files below are first restored
@@ -15,7 +15,7 @@ import pathlib
 import subprocess
 import sys
 
-BUILD_STAMP = "v5"
+BUILD_STAMP = "v6"
 BASE = "72dc66f"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -23,6 +23,7 @@ JAVA_DIR = "app/src/main/java/com/world/cloudxsolution/"
 JAVA = JAVA_DIR + "MainActivity.java"
 DIAGLOG = JAVA_DIR + "DiagnosticLog.java"
 SERVICE = JAVA_DIR + "StreamingService.java"
+ASSET_JS = "app/src/main/assets/index.js"
 WATCHDOG = JAVA_DIR + "StallWatchdog.java"   # new file, written by this script
 LAYOUT = "app/src/main/res/layout/"
 MANIFEST = "app/src/main/AndroidManifest.xml"
@@ -30,7 +31,7 @@ GRADLE = "app/build.gradle.kts"
 STRINGS = "app/src/main/res/values/strings.xml"
 
 OWNED = [
-    MANIFEST, JAVA, DIAGLOG, SERVICE, GRADLE, STRINGS,
+    MANIFEST, JAVA, DIAGLOG, SERVICE, ASSET_JS, GRADLE, STRINGS,
     LAYOUT + "dialog_app_settings.xml",
     LAYOUT + "dialog_streaming_menu.xml",
     LAYOUT + "dialog_intro_help.xml",
@@ -430,5 +431,94 @@ edit(SERVICE,
      "        DiagnosticLog.log(\"stream\", \"datachannel_state\", label + \" = \" + state);\n"
      "        broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));\n",
      "log data channel (controller input) state")
+
+
+# ---- 7. WEBSITE RELOAD DIAGNOSIS (the "website reboots when I start a game" problem) ----
+# The site script (index.js) reloads the whole page 3 s after load when the page body has the
+# class "legacyBackground". These edits record every page load, page error, relevant console
+# message, the moment that reload fires, and whether the stream handover started.
+NET_HELPERS = '''    private int diagNetLogCount = 0;
+    private int diagConsoleCount = 0;
+
+    private void diagConsole(ConsoleMessage m) {
+        try {
+            String msg = m.message();
+            if (msg == null) return;
+            boolean interesting = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
+                    || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING
+                    || msg.contains("Bx")
+                    || msg.contains("Unsupported")
+                    || msg.toLowerCase(java.util.Locale.ROOT).contains("reload");
+            if (!interesting || diagConsoleCount >= 150) return;
+            diagConsoleCount++;
+            String shown = msg.length() > 300 ? msg.substring(0, 300) : msg;
+            DiagnosticLog.log("main", "console_" + m.messageLevel(), shown + " @" + m.sourceId() + ":" + m.lineNumber());
+        } catch (Throwable ignored) {
+        }
+    }
+
+'''
+edit(JAVA,
+     "    private void showDiagnostic(String title, String text) {\n",
+     NET_HELPERS + "    private void showDiagnostic(String title, String text) {\n",
+     "web diagnostics helpers")
+
+edit(JAVA,
+     "                Log.i(TAG, \"Page started: \" + url);\n",
+     "                Log.i(TAG, \"Page started: \" + url);\n"
+     "                DiagnosticLog.log(\"main\", \"page_started\", String.valueOf(url));\n",
+     "log page start")
+
+edit(JAVA,
+     "                super.onPageFinished(view, url);\n                setWebviewVisible();\n",
+     "                super.onPageFinished(view, url);\n"
+     "                DiagnosticLog.log(\"main\", \"page_finished\", url + \" | textZoom=\" + view.getSettings().getTextZoom()\n"
+     "                        + \" | ua=\" + view.getSettings().getUserAgentString());\n"
+     "                setWebviewVisible();\n",
+     "log page finish with user agent")
+
+edit(JAVA,
+     "            @Override\n            public void onPageFinished(WebView view, String url) {\n",
+     "            @Override\n"
+     "            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse errorResponse) {\n"
+     "                try {\n"
+     "                    if (diagNetLogCount < 80) {\n"
+     "                        diagNetLogCount++;\n"
+     "                        DiagnosticLog.log(\"main\", \"http_error\", errorResponse.getStatusCode() + \" \" + request.getMethod() + \" \" + request.getUrl()\n"
+     "                                + (request.isForMainFrame() ? \" (main frame)\" : \"\"));\n"
+     "                    }\n"
+     "                } catch (Throwable ignored) {\n"
+     "                }\n"
+     "            }\n\n"
+     "            @Override\n"
+     "            public void onReceivedError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceError error) {\n"
+     "                try {\n"
+     "                    if (diagNetLogCount < 80) {\n"
+     "                        diagNetLogCount++;\n"
+     "                        DiagnosticLog.log(\"main\", \"load_error\", error.getErrorCode() + \" \" + error.getDescription() + \" \" + request.getUrl()\n"
+     "                                + (request.isForMainFrame() ? \" (main frame)\" : \"\"));\n"
+     "                    }\n"
+     "                } catch (Throwable ignored) {\n"
+     "                }\n"
+     "            }\n\n"
+     "            @Override\n            public void onPageFinished(WebView view, String url) {\n",
+     "log page and network errors")
+
+edit(JAVA,
+     "            Log.d(TAG, \"WebView Console: \" + consoleMessage.message());\n",
+     "            Log.d(TAG, \"WebView Console: \" + consoleMessage.message());\n"
+     "            diagConsole(consoleMessage);\n",
+     "log important website console messages")
+
+edit(JAVA,
+     "    public void onPeerConnectionConfigReceived(String configJson) {\n",
+     "    public void onPeerConnectionConfigReceived(String configJson) {\n"
+     "        DiagnosticLog.log(\"main\", \"handover_peer_config\", \"received, length=\" + (configJson == null ? -1 : configJson.length()));\n",
+     "log when the stream handover begins")
+
+edit(ASSET_JS,
+     "{ window.stop(), window.location.reload(!0);}",
+     "{ console.log(\"[BxC] legacyBackground found -> RELOADING page. url=\" + location.href + \" | ua=\" + navigator.userAgent); window.stop(), window.location.reload(!0);}",
+     "log when the script reloads the page")
 
 print("\nDone." if changed else "\nNothing to change.")
