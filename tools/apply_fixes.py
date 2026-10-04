@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Edits for the CloudX fork (version v4).
+Edits for the CloudX fork (version v5).
 
 Base = commit 72dc66f (your fork on Oct 3, before any script ran).
 Run with --reset (the workflow does) and the OWNED files below are first restored
@@ -15,20 +15,22 @@ import pathlib
 import subprocess
 import sys
 
-BUILD_STAMP = "v4"
+BUILD_STAMP = "v5"
 BASE = "72dc66f"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 JAVA_DIR = "app/src/main/java/com/world/cloudxsolution/"
 JAVA = JAVA_DIR + "MainActivity.java"
 DIAGLOG = JAVA_DIR + "DiagnosticLog.java"
+SERVICE = JAVA_DIR + "StreamingService.java"
+WATCHDOG = JAVA_DIR + "StallWatchdog.java"   # new file, written by this script
 LAYOUT = "app/src/main/res/layout/"
 MANIFEST = "app/src/main/AndroidManifest.xml"
 GRADLE = "app/build.gradle.kts"
 STRINGS = "app/src/main/res/values/strings.xml"
 
 OWNED = [
-    MANIFEST, JAVA, DIAGLOG, GRADLE, STRINGS,
+    MANIFEST, JAVA, DIAGLOG, SERVICE, GRADLE, STRINGS,
     LAYOUT + "dialog_app_settings.xml",
     LAYOUT + "dialog_streaming_menu.xml",
     LAYOUT + "dialog_intro_help.xml",
@@ -191,7 +193,8 @@ edit(JAVA,
 edit(JAVA,
      "        setContentView(R.layout.activity_main);\n",
      "        setContentView(R.layout.activity_main);\n"
-     "        new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);\n",
+     "        new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);\n"
+     "        StallWatchdog.startMainThreadWatch(\"main\");\n",
      "show how the app last stopped, at startup")
 
 # 5b. Memory telemetry in BOTH processes (the 3-second snapshot already exists)
@@ -227,5 +230,205 @@ edit(JAVA,
      "                return true;\n"
      "            }\n\n",
      "survive a WebView renderer death and report it")
+
+
+# ---- 6. HANG DIAGNOSIS + SAFEGUARD (your "Exit game" freeze) ------------------------
+# Evidence (from your logs): Exit game calls closeSession() on the UI thread, a blocking
+# cross-process call. In the failing run the service logged the start of the call but never
+# the "ICE CLOSED" that a normal exit logs, and the app's own heartbeat stopped. So the
+# call did not return. These edits (a) record exactly where it is stuck and (b) stop one
+# stuck step from freezing the UI thread, by waiting at most a few seconds for it.
+WATCHDOG_SOURCE = '''package com.world.cloudxsolution;
+
+import android.os.Handler;
+import android.os.Looper;
+import android.os.SystemClock;
+
+import java.util.Map;
+import java.util.concurrent.atomic.AtomicLong;
+
+/**
+ * Diagnostics helper (written by tools/apply_fixes.py).
+ *  - startMainThreadWatch: logs a stack dump if the main thread stops responding.
+ *  - runBounded: runs a call that might hang on a helper thread and waits at most
+ *    timeoutMs, so one stuck step cannot freeze the caller (an ANR).
+ *  - flow counters: video frames received and input messages sent.
+ */
+final class StallWatchdog {
+    static final AtomicLong framesIn = new AtomicLong();
+    static final AtomicLong inputSends = new AtomicLong();
+    private static long lastFrames;
+    private static long lastInputs;
+    private static volatile long lastBeat = SystemClock.uptimeMillis();
+    private static boolean started;
+
+    private StallWatchdog() {
+    }
+
+    static synchronized String flowSnapshot() {
+        long f = framesIn.get();
+        long i = inputSends.get();
+        String s = "framesIn +" + (f - lastFrames) + " (total " + f + ") | inputSends +" + (i - lastInputs) + " (total " + i + ")";
+        lastFrames = f;
+        lastInputs = i;
+        return s;
+    }
+
+    static synchronized void startMainThreadWatch(final String process) {
+        if (started) return;
+        started = true;
+        final Handler main = new Handler(Looper.getMainLooper());
+        main.post(new Runnable() {
+            @Override
+            public void run() {
+                lastBeat = SystemClock.uptimeMillis();
+                main.postDelayed(this, 1000);
+            }
+        });
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                boolean reported = false;
+                while (true) {
+                    try {
+                        Thread.sleep(1000);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    long stalled = SystemClock.uptimeMillis() - lastBeat;
+                    if (stalled > 3000 && !reported) {
+                        reported = true;
+                        DiagnosticLog.log(process, "MAIN_THREAD_STALLED", "main thread not responding for " + stalled + " ms");
+                        dumpAll(process, "main_thread_stalled");
+                    } else if (stalled < 1500) {
+                        reported = false;
+                    }
+                }
+            }
+        }, "stall-watchdog");
+        t.setDaemon(true);
+        t.start();
+    }
+
+    static boolean runBounded(final String process, final String label, long timeoutMs, final Runnable work) {
+        final long start = SystemClock.uptimeMillis();
+        Thread t = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    work.run();
+                } catch (Throwable e) {
+                    DiagnosticLog.logException(process, "bounded_" + label + "_EXCEPTION", e);
+                }
+            }
+        }, "bounded-" + label);
+        t.setDaemon(true);
+        t.start();
+        try {
+            t.join(timeoutMs);
+        } catch (InterruptedException ignored) {
+        }
+        long took = SystemClock.uptimeMillis() - start;
+        if (t.isAlive()) {
+            DiagnosticLog.log(process, "BOUNDED_TIMEOUT_" + label, "still running after " + took + " ms; continuing without waiting");
+            dumpAll(process, label);
+            return false;
+        }
+        if (took > 300) {
+            DiagnosticLog.log(process, "bounded_slow_" + label, "took " + took + " ms");
+        }
+        return true;
+    }
+
+    static void dumpAll(String process, String reason) {
+        try {
+            StringBuilder sb = new StringBuilder("stack dump (" + reason + ")\\n");
+            for (Map.Entry<Thread, StackTraceElement[]> e : Thread.getAllStackTraces().entrySet()) {
+                StackTraceElement[] st = e.getValue();
+                if (st.length == 0) continue;
+                String name = e.getKey().getName();
+                if (name.contains("Daemon") || name.contains("Signal Catcher") || name.contains("Jit")
+                        || name.contains("ReferenceQueue") || name.contains("perfetto") || name.contains("Profile Saver")) continue;
+                if (st[0].getMethodName().equals("nativePollOnce")) continue;
+                sb.append("[").append(name).append("] ").append(e.getKey().getState()).append('\\n');
+                for (int i = 0; i < Math.min(st.length, 12); i++) {
+                    sb.append("   at ").append(st[i]).append('\\n');
+                }
+                if (sb.length() > 40000) {
+                    sb.append("...truncated\\n");
+                    break;
+                }
+            }
+            DiagnosticLog.log(process, "STACK_DUMP_" + reason, sb.toString());
+        } catch (Throwable ignored) {
+            // diagnostics must never crash the app
+        }
+    }
+}
+'''
+
+wp = ROOT / WATCHDOG
+if wp.exists() and wp.read_text(encoding="utf-8") == WATCHDOG_SOURCE:
+    print("skip (already applied): StallWatchdog.java")
+else:
+    wp.write_text(WATCHDOG_SOURCE, encoding="utf-8")
+    changed.append("StallWatchdog.java")
+    print("applied: StallWatchdog.java (new file)")
+
+# 6a. Bound the two steps that can block: releasing the video renderer, and closing WebRTC.
+edit(SERVICE,
+     "                eglRenderer.release();\n                eglRenderer = null;\n            }\n"
+     "            if (serviceEglBase != null) {\n                serviceEglBase.release();\n                serviceEglBase = null;\n            }\n",
+     "                final org.webrtc.EglRenderer rendererToRelease = eglRenderer;\n"
+     "                eglRenderer = null;\n"
+     "                final EglBase eglBaseToRelease = serviceEglBase;\n"
+     "                serviceEglBase = null;\n"
+     "                StallWatchdog.runBounded(\"stream\", \"egl_release\", 1200, () -> {\n"
+     "                    rendererToRelease.release();\n"
+     "                    if (eglBaseToRelease != null) eglBaseToRelease.release();\n"
+     "                });\n"
+     "            }\n"
+     "            if (serviceEglBase != null) {\n"
+     "                final EglBase eglBaseOnly = serviceEglBase;\n"
+     "                serviceEglBase = null;\n"
+     "                StallWatchdog.runBounded(\"stream\", \"egl_base_release\", 1200, () -> eglBaseOnly.release());\n"
+     "            }\n",
+     "bounded wait when releasing the video renderer")
+
+edit(SERVICE,
+     "        public void closeSession() {\n            clearRenderSurface();\n            webRtcReceiver.closeSession();\n        }\n",
+     "        public void closeSession() {\n"
+     "            DiagnosticLog.log(\"stream\", \"closeSession_begin\", \"thread=\" + Thread.currentThread().getName());\n"
+     "            clearRenderSurface();\n"
+     "            StallWatchdog.runBounded(\"stream\", \"webrtc_closeSession\", 1800, () -> webRtcReceiver.closeSession());\n"
+     "            DiagnosticLog.log(\"stream\", \"closeSession_end\", \"\");\n"
+     "        }\n",
+     "bounded wait when closing the WebRTC session")
+
+# 6b. Flow counters: are video frames arriving, are controller inputs being sent?
+edit(SERVICE,
+     "                    if (eglRenderer != null) {\n                        eglRenderer.onFrame(frame);\n                    }\n",
+     "                    StallWatchdog.framesIn.incrementAndGet();\n"
+     "                    if (eglRenderer != null) {\n                        eglRenderer.onFrame(frame);\n                    }\n",
+     "count video frames received")
+edit(SERVICE,
+     "        public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {\n            if (binary != null) {\n",
+     "        public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {\n"
+     "            StallWatchdog.inputSends.incrementAndGet();\n"
+     "            if (binary != null) {\n",
+     "count controller messages sent")
+edit(SERVICE,
+     "                DiagnosticLog.logMemory(\"stream\");\n                callbackHandler.postDelayed(this, 3000);\n",
+     "                DiagnosticLog.logMemory(\"stream\");\n"
+     "                DiagnosticLog.log(\"stream\", \"flow\", StallWatchdog.flowSnapshot());\n"
+     "                callbackHandler.postDelayed(this, 3000);\n",
+     "log frame/input flow every 3 s")
+edit(SERVICE,
+     "    public void onDataChannelStateChanged(String label, String state) {\n"
+     "        broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));\n",
+     "    public void onDataChannelStateChanged(String label, String state) {\n"
+     "        DiagnosticLog.log(\"stream\", \"datachannel_state\", label + \" = \" + state);\n"
+     "        broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));\n",
+     "log data channel (controller input) state")
 
 print("\nDone." if changed else "\nNothing to change.")
