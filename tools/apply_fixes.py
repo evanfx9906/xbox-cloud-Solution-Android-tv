@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Edits for the CloudX fork (version v6).
+Edits for the CloudX fork (version v7).
 
 Base = commit 72dc66f (your fork on Oct 3, before any script ran).
 Run with --reset (the workflow does) and the OWNED files below are first restored
@@ -15,7 +15,7 @@ import pathlib
 import subprocess
 import sys
 
-BUILD_STAMP = "v6"
+BUILD_STAMP = "v7"
 BASE = "72dc66f"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -24,6 +24,7 @@ JAVA = JAVA_DIR + "MainActivity.java"
 DIAGLOG = JAVA_DIR + "DiagnosticLog.java"
 SERVICE = JAVA_DIR + "StreamingService.java"
 ASSET_JS = "app/src/main/assets/index.js"
+WEBRTC = JAVA_DIR + "WebRtcReceiver.java"
 WATCHDOG = JAVA_DIR + "StallWatchdog.java"   # new file, written by this script
 LAYOUT = "app/src/main/res/layout/"
 MANIFEST = "app/src/main/AndroidManifest.xml"
@@ -31,7 +32,7 @@ GRADLE = "app/build.gradle.kts"
 STRINGS = "app/src/main/res/values/strings.xml"
 
 OWNED = [
-    MANIFEST, JAVA, DIAGLOG, SERVICE, ASSET_JS, GRADLE, STRINGS,
+    MANIFEST, JAVA, DIAGLOG, SERVICE, WEBRTC, ASSET_JS, GRADLE, STRINGS,
     LAYOUT + "dialog_app_settings.xml",
     LAYOUT + "dialog_streaming_menu.xml",
     LAYOUT + "dialog_intro_help.xml",
@@ -384,7 +385,7 @@ edit(SERVICE,
      "                eglRenderer = null;\n"
      "                final EglBase eglBaseToRelease = serviceEglBase;\n"
      "                serviceEglBase = null;\n"
-     "                StallWatchdog.runBounded(\"stream\", \"egl_release\", 1200, () -> {\n"
+     "                StallWatchdog.runBounded(\"stream\", \"egl_release\", 800, () -> {\n"
      "                    rendererToRelease.release();\n"
      "                    if (eglBaseToRelease != null) eglBaseToRelease.release();\n"
      "                });\n"
@@ -392,7 +393,7 @@ edit(SERVICE,
      "            if (serviceEglBase != null) {\n"
      "                final EglBase eglBaseOnly = serviceEglBase;\n"
      "                serviceEglBase = null;\n"
-     "                StallWatchdog.runBounded(\"stream\", \"egl_base_release\", 1200, () -> eglBaseOnly.release());\n"
+     "                StallWatchdog.runBounded(\"stream\", \"egl_base_release\", 800, () -> eglBaseOnly.release());\n"
      "            }\n",
      "bounded wait when releasing the video renderer")
 
@@ -401,7 +402,7 @@ edit(SERVICE,
      "        public void closeSession() {\n"
      "            DiagnosticLog.log(\"stream\", \"closeSession_begin\", \"thread=\" + Thread.currentThread().getName());\n"
      "            clearRenderSurface();\n"
-     "            StallWatchdog.runBounded(\"stream\", \"webrtc_closeSession\", 1800, () -> webRtcReceiver.closeSession());\n"
+     "            StallWatchdog.runBounded(\"stream\", \"webrtc_closeSession\", 1200, () -> webRtcReceiver.closeSession());\n"
      "            DiagnosticLog.log(\"stream\", \"closeSession_end\", \"\");\n"
      "        }\n",
      "bounded wait when closing the WebRTC session")
@@ -520,5 +521,87 @@ edit(ASSET_JS,
      "{ window.stop(), window.location.reload(!0);}",
      "{ console.log(\"[BxC] legacyBackground found -> RELOADING page. url=\" + location.href + \" | ua=\" + navigator.userAgent); window.stop(), window.location.reload(!0);}",
      "log when the script reloads the page")
+
+
+# ---- 8. THE FREEZE: FIX FOR THE ROOT CAUSE (verified from your phone's stack traces) --------
+# Evidence: (1) the video render thread was inside PeerConnection.getStats, called from
+# WebRtcReceiver.onLogMessage; (2) the library's EglRenderer.logStatistics calls that log
+# callback while holding statisticsLock, and EglRenderer.onFrame needs the same lock first,
+# so frame delivery stops (your log: frames per 3 s dropped from ~90 to 0 while controller
+# input kept flowing); (3) the exit call then hung in VideoTrack.removeSink. The fork added
+# that getStats call (only active while the performance overlay is on); the original app only
+# forwards a text string. Fix: never make the blocking call on that thread.
+OLD_LOG_CALLBACK = """    @Override
+    public void onLogMessage(String message, Logging.Severity severity, String tag) {
+
+        if (showStats && message != null && message.startsWith("stream-rendererDuration:") && peerConnection != null) {
+            try {
+                peerConnection.getStats(report -> {
+                    String stats = buildLiveNetworkStatsString(report);
+                    if (signalingListener != null) {
+                        signalingListener.onPerformanceStatsReceived(stats);
+                    }
+                });
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to collect live stats", e);
+                DiagnosticLog.logException("stream", "getStats_fail", e);
+            }
+        }
+    }
+"""
+NEW_LOG_CALLBACK = """    private final java.util.concurrent.atomic.AtomicBoolean statsInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.ExecutorService statsExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "stats-collector");
+                t.setDaemon(true);
+                return t;
+            });
+
+    @Override
+    public void onLogMessage(String message, Logging.Severity severity, String tag) {
+        // This callback runs on the video render thread while it holds a lock that frame
+        // delivery needs. A blocking WebRTC call here can freeze the video, so the stats
+        // request is handed to a helper thread, one at a time (skipped while one is pending).
+        if (showStats && message != null && message.startsWith("stream-rendererDuration:") && peerConnection != null) {
+            final PeerConnection pcForStats = peerConnection;
+            if (statsInFlight.compareAndSet(false, true)) {
+                statsExecutor.execute(() -> {
+                    try {
+                        if (pcForStats != peerConnection) {
+                            statsInFlight.set(false);
+                            return;
+                        }
+                        pcForStats.getStats(report -> {
+                            try {
+                                String stats = buildLiveNetworkStatsString(report);
+                                if (signalingListener != null) {
+                                    signalingListener.onPerformanceStatsReceived(stats);
+                                }
+                            } finally {
+                                statsInFlight.set(false);
+                            }
+                        });
+                    } catch (Exception e) {
+                        statsInFlight.set(false);
+                        Log.e(TAG, "Failed to collect live stats", e);
+                        DiagnosticLog.logException("stream", "getStats_fail", e);
+                    }
+                });
+            }
+        }
+    }
+"""
+edit(WEBRTC, OLD_LOG_CALLBACK, NEW_LOG_CALLBACK,
+     "move the stats request off the video render thread (root cause of the freeze)")
+
+# Exit safeguard, part 2: the exit call was also stuck detaching the video sink.
+edit(SERVICE,
+     "                    remoteTrack.removeSink(webRtcReceiver.getPendingRenderTarget());\n",
+     """                    final VideoTrack trackToDetach = remoteTrack;
+                    StallWatchdog.runBounded("stream", "remove_sink", 800,
+                            () -> trackToDetach.removeSink(webRtcReceiver.getPendingRenderTarget()));
+""",
+     "bounded wait when detaching the video sink")
 
 print("\nDone." if changed else "\nNothing to change.")
