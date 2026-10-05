@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Edits for the CloudX fork (version v7).
+Edits for the CloudX fork (FINAL version, v8).
 
 Base = commit 72dc66f (your fork on Oct 3, before any script ran).
 Run with --reset (the workflow does) and the OWNED files below are first restored
@@ -15,7 +15,6 @@ import pathlib
 import subprocess
 import sys
 
-BUILD_STAMP = "v7"
 BASE = "72dc66f"
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -25,7 +24,8 @@ DIAGLOG = JAVA_DIR + "DiagnosticLog.java"
 SERVICE = JAVA_DIR + "StreamingService.java"
 ASSET_JS = "app/src/main/assets/index.js"
 WEBRTC = JAVA_DIR + "WebRtcReceiver.java"
-WATCHDOG = JAVA_DIR + "StallWatchdog.java"   # new file, written by this script
+OLD_WATCHDOG = JAVA_DIR + "StallWatchdog.java"   # debug helper from earlier builds: deleted
+BOUNDED = JAVA_DIR + "BoundedCall.java"          # new file, written by this script
 LAYOUT = "app/src/main/res/layout/"
 MANIFEST = "app/src/main/AndroidManifest.xml"
 GRADLE = "app/build.gradle.kts"
@@ -127,200 +127,38 @@ edit(STRINGS,
      '<string name="app_name">cloudxSolution Fixed</string>',
      "app label 'cloudxSolution Fixed'")
 
-# ---- 5. CRASH DIAGNOSTICS (read-only, except one safety net, see 5c) ----------------
-# 5a. Popup at startup: why did each app process last stop? (Android 11+)
-DIAG_HELPERS = '''    // ---- Crash diagnostics (added by apply_fixes.py) ----
-    private void showDiagnostic(String title, String text) {
-        new androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle(title)
-                .setMessage(text)
-                .setPositiveButton("OK", null)
-                .show();
-    }
+# ---- 5. SAFEGUARDS (quiet, no popups) ---------------------------------------------------
+# Verified from your phone's logs and stack traces: the freeze came from a WebRTC statistics
+# call made on the video render thread; "Exit game" then hung waiting on that stuck video
+# pipeline. These two edits are the fix, and the bounded waits are the safety net.
 
-    private void diagShowLastExits() {
-        if (Build.VERSION.SDK_INT < 30) return;
-        try {
-            android.app.ActivityManager am =
-                    (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            java.util.List<android.app.ApplicationExitInfo> exits =
-                    am.getHistoricalProcessExitReasons(null, 0, 5);
-            if (exits == null || exits.isEmpty()) return;
-            long now = System.currentTimeMillis();
-            StringBuilder sb = new StringBuilder();
-            for (android.app.ApplicationExitInfo e : exits) {
-                String reason;
-                switch (e.getReason()) {
-                    case android.app.ApplicationExitInfo.REASON_CRASH: reason = "CRASH (Java exception)"; break;
-                    case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE: reason = "CRASH_NATIVE"; break;
-                    case android.app.ApplicationExitInfo.REASON_ANR: reason = "ANR (not responding)"; break;
-                    case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: reason = "LOW_MEMORY (killed by system)"; break;
-                    case android.app.ApplicationExitInfo.REASON_SIGNALED: reason = "SIGNALED (killed)"; break;
-                    case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: reason = "EXCESSIVE_RESOURCE_USAGE"; break;
-                    case android.app.ApplicationExitInfo.REASON_USER_REQUESTED: reason = "USER_REQUESTED"; break;
-                    case android.app.ApplicationExitInfo.REASON_USER_STOPPED: reason = "USER_STOPPED"; break;
-                    case android.app.ApplicationExitInfo.REASON_EXIT_SELF: reason = "EXIT_SELF"; break;
-                    case android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED: reason = "DEPENDENCY_DIED"; break;
-                    case android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE: reason = "PERMISSION_CHANGE"; break;
-                    case android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE: reason = "INITIALIZATION_FAILURE"; break;
-                    case android.app.ApplicationExitInfo.REASON_OTHER: reason = "OTHER"; break;
-                    default: reason = "code " + e.getReason();
-                }
-                sb.append(e.getProcessName()).append(" - ").append(reason)
-                        .append("\\n   ").append((now - e.getTimestamp()) / 60000).append(" min ago")
-                        .append(", status ").append(e.getStatus())
-                        .append(", rss ").append(e.getRss() / 1024).append(" MB")
-                        .append("\\n   ").append(e.getDescription()).append("\\n\\n");
-            }
-            String text = sb.toString().trim();
-            DiagnosticLog.log("main", "previous_exits", text);
-            showDiagnostic("Build ''' + BUILD_STAMP + ''' - how the app last stopped", text);
-        } catch (Throwable t) {
-            DiagnosticLog.logException("main", "exit_info_fail", t);
-        }
-    }
+# 5a. Remove the debug helper that earlier builds added (no longer needed).
+old_wd = ROOT / OLD_WATCHDOG
+if old_wd.exists():
+    old_wd.unlink()
+    changed.append("removed StallWatchdog.java")
+    print("applied: removed StallWatchdog.java (debug helper)")
 
-    @Override
-    public void onTrimMemory(int level) {
-        super.onTrimMemory(level);
-        DiagnosticLog.log("main", "onTrimMemory", "level=" + level);
-    }
-
-'''
-edit(JAVA,
-     "private boolean debug=false;\n    public void showCustomToast",
-     DIAG_HELPERS + "private boolean debug=false;\n    public void showCustomToast",
-     "crash diagnostics helpers")
-
-edit(JAVA,
-     "        setContentView(R.layout.activity_main);\n",
-     "        setContentView(R.layout.activity_main);\n"
-     "        new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);\n"
-     "        StallWatchdog.startMainThreadWatch(\"main\");\n",
-     "show how the app last stopped, at startup")
-
-# 5b. Memory telemetry in BOTH processes (the 3-second snapshot already exists)
-edit(DIAGLOG,
-     '            mem.put("maxMB", rt.maxMemory() / (1024 * 1024));\n',
-     '            mem.put("maxMB", rt.maxMemory() / (1024 * 1024));\n'
-     '            try {\n'
-     '                mem.put("pssMB", android.os.Debug.getPss() / 1024);\n'
-     '                mem.put("nativeHeapMB", android.os.Debug.getNativeHeapAllocatedSize() / (1024 * 1024));\n'
-     '                String[] fds = new java.io.File("/proc/self/fd").list();\n'
-     '                mem.put("openFds", fds == null ? -1 : fds.length);\n'
-     '                try (java.io.BufferedReader br = new java.io.BufferedReader(new java.io.FileReader("/proc/self/status"))) {\n'
-     '                    String line;\n'
-     '                    while ((line = br.readLine()) != null) {\n'
-     '                        if (line.startsWith("Threads:")) mem.put("threads", line.substring(8).trim());\n'
-     '                    }\n'
-     '                }\n'
-     '            } catch (Throwable ignored) {\n'
-     '            }\n',
-     "memory telemetry: PSS, native heap, open files, threads")
-
-# 5c. The one behaviour change: if the WebView's renderer process dies, keep the app
-# alive instead of letting Android close it (per Android's WebView termination docs).
-edit(JAVA,
-     "        webView.setWebViewClient(new WebViewClient() {\n",
-     "        webView.setWebViewClient(new WebViewClient() {\n"
-     "            @Override\n"
-     "            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {\n"
-     "                final String info = \"didCrash=\" + detail.didCrash()\n"
-     "                        + \" (false = killed by the system, usually low memory)\";\n"
-     "                DiagnosticLog.log(\"main\", \"RENDER_PROCESS_GONE\", info);\n"
-     "                runOnUiThread(() -> showDiagnostic(\"Build " + BUILD_STAMP + " - WebView process died\", info));\n"
-     "                return true;\n"
-     "            }\n\n",
-     "survive a WebView renderer death and report it")
-
-
-# ---- 6. HANG DIAGNOSIS + SAFEGUARD (your "Exit game" freeze) ------------------------
-# Evidence (from your logs): Exit game calls closeSession() on the UI thread, a blocking
-# cross-process call. In the failing run the service logged the start of the call but never
-# the "ICE CLOSED" that a normal exit logs, and the app's own heartbeat stopped. So the
-# call did not return. These edits (a) record exactly where it is stuck and (b) stop one
-# stuck step from freezing the UI thread, by waiting at most a few seconds for it.
-WATCHDOG_SOURCE = '''package com.world.cloudxsolution;
-
-import android.os.Handler;
-import android.os.Looper;
-import android.os.SystemClock;
-
-import java.util.Map;
-import java.util.concurrent.atomic.AtomicLong;
+# 5b. Small helper: run a call that might hang on a helper thread, wait at most timeoutMs.
+BOUNDED_SOURCE = """package com.world.cloudxsolution;
 
 /**
- * Diagnostics helper (written by tools/apply_fixes.py).
- *  - startMainThreadWatch: logs a stack dump if the main thread stops responding.
- *  - runBounded: runs a call that might hang on a helper thread and waits at most
- *    timeoutMs, so one stuck step cannot freeze the caller (an ANR).
- *  - flow counters: video frames received and input messages sent.
+ * Written by tools/apply_fixes.py.
+ * Runs a call that might hang on a helper thread and waits at most timeoutMs, so one stuck
+ * step cannot freeze the caller (which would show as "app isn't responding").
  */
-final class StallWatchdog {
-    static final AtomicLong framesIn = new AtomicLong();
-    static final AtomicLong inputSends = new AtomicLong();
-    private static long lastFrames;
-    private static long lastInputs;
-    private static volatile long lastBeat = SystemClock.uptimeMillis();
-    private static boolean started;
-
-    private StallWatchdog() {
+final class BoundedCall {
+    private BoundedCall() {
     }
 
-    static synchronized String flowSnapshot() {
-        long f = framesIn.get();
-        long i = inputSends.get();
-        String s = "framesIn +" + (f - lastFrames) + " (total " + f + ") | inputSends +" + (i - lastInputs) + " (total " + i + ")";
-        lastFrames = f;
-        lastInputs = i;
-        return s;
-    }
-
-    static synchronized void startMainThreadWatch(final String process) {
-        if (started) return;
-        started = true;
-        final Handler main = new Handler(Looper.getMainLooper());
-        main.post(new Runnable() {
-            @Override
-            public void run() {
-                lastBeat = SystemClock.uptimeMillis();
-                main.postDelayed(this, 1000);
-            }
-        });
-        Thread t = new Thread(new Runnable() {
-            @Override
-            public void run() {
-                boolean reported = false;
-                while (true) {
-                    try {
-                        Thread.sleep(1000);
-                    } catch (InterruptedException e) {
-                        return;
-                    }
-                    long stalled = SystemClock.uptimeMillis() - lastBeat;
-                    if (stalled > 3000 && !reported) {
-                        reported = true;
-                        DiagnosticLog.log(process, "MAIN_THREAD_STALLED", "main thread not responding for " + stalled + " ms");
-                        dumpAll(process, "main_thread_stalled");
-                    } else if (stalled < 1500) {
-                        reported = false;
-                    }
-                }
-            }
-        }, "stall-watchdog");
-        t.setDaemon(true);
-        t.start();
-    }
-
-    static boolean runBounded(final String process, final String label, long timeoutMs, final Runnable work) {
-        final long start = SystemClock.uptimeMillis();
+    static boolean run(final String process, final String label, long timeoutMs, final Runnable work) {
         Thread t = new Thread(new Runnable() {
             @Override
             public void run() {
                 try {
                     work.run();
                 } catch (Throwable e) {
-                    DiagnosticLog.logException(process, "bounded_" + label + "_EXCEPTION", e);
+                    DiagnosticLog.logException(process, "bounded_" + label, e);
                 }
             }
         }, "bounded-" + label);
@@ -330,207 +168,23 @@ final class StallWatchdog {
             t.join(timeoutMs);
         } catch (InterruptedException ignored) {
         }
-        long took = SystemClock.uptimeMillis() - start;
         if (t.isAlive()) {
-            DiagnosticLog.log(process, "BOUNDED_TIMEOUT_" + label, "still running after " + took + " ms; continuing without waiting");
-            dumpAll(process, label);
+            DiagnosticLog.log(process, "bounded_timeout_" + label, "still running after " + timeoutMs + " ms; continuing");
             return false;
-        }
-        if (took > 300) {
-            DiagnosticLog.log(process, "bounded_slow_" + label, "took " + took + " ms");
         }
         return true;
     }
-
-    static void dumpAll(String process, String reason) {
-        try {
-            StringBuilder sb = new StringBuilder("stack dump (" + reason + ")\\n");
-            for (Map.Entry<Thread, StackTraceElement[]> e : Thread.getAllStackTraces().entrySet()) {
-                StackTraceElement[] st = e.getValue();
-                if (st.length == 0) continue;
-                String name = e.getKey().getName();
-                if (name.contains("Daemon") || name.contains("Signal Catcher") || name.contains("Jit")
-                        || name.contains("ReferenceQueue") || name.contains("perfetto") || name.contains("Profile Saver")) continue;
-                if (st[0].getMethodName().equals("nativePollOnce")) continue;
-                sb.append("[").append(name).append("] ").append(e.getKey().getState()).append('\\n');
-                for (int i = 0; i < Math.min(st.length, 12); i++) {
-                    sb.append("   at ").append(st[i]).append('\\n');
-                }
-                if (sb.length() > 40000) {
-                    sb.append("...truncated\\n");
-                    break;
-                }
-            }
-            DiagnosticLog.log(process, "STACK_DUMP_" + reason, sb.toString());
-        } catch (Throwable ignored) {
-            // diagnostics must never crash the app
-        }
-    }
 }
-'''
-
-wp = ROOT / WATCHDOG
-if wp.exists() and wp.read_text(encoding="utf-8") == WATCHDOG_SOURCE:
-    print("skip (already applied): StallWatchdog.java")
+"""
+bp = ROOT / BOUNDED
+if bp.exists() and bp.read_text(encoding="utf-8") == BOUNDED_SOURCE:
+    print("skip (already applied): BoundedCall.java")
 else:
-    wp.write_text(WATCHDOG_SOURCE, encoding="utf-8")
-    changed.append("StallWatchdog.java")
-    print("applied: StallWatchdog.java (new file)")
+    bp.write_text(BOUNDED_SOURCE, encoding="utf-8")
+    changed.append("BoundedCall.java")
+    print("applied: BoundedCall.java (new file)")
 
-# 6a. Bound the two steps that can block: releasing the video renderer, and closing WebRTC.
-edit(SERVICE,
-     "                eglRenderer.release();\n                eglRenderer = null;\n            }\n"
-     "            if (serviceEglBase != null) {\n                serviceEglBase.release();\n                serviceEglBase = null;\n            }\n",
-     "                final org.webrtc.EglRenderer rendererToRelease = eglRenderer;\n"
-     "                eglRenderer = null;\n"
-     "                final EglBase eglBaseToRelease = serviceEglBase;\n"
-     "                serviceEglBase = null;\n"
-     "                StallWatchdog.runBounded(\"stream\", \"egl_release\", 800, () -> {\n"
-     "                    rendererToRelease.release();\n"
-     "                    if (eglBaseToRelease != null) eglBaseToRelease.release();\n"
-     "                });\n"
-     "            }\n"
-     "            if (serviceEglBase != null) {\n"
-     "                final EglBase eglBaseOnly = serviceEglBase;\n"
-     "                serviceEglBase = null;\n"
-     "                StallWatchdog.runBounded(\"stream\", \"egl_base_release\", 800, () -> eglBaseOnly.release());\n"
-     "            }\n",
-     "bounded wait when releasing the video renderer")
-
-edit(SERVICE,
-     "        public void closeSession() {\n            clearRenderSurface();\n            webRtcReceiver.closeSession();\n        }\n",
-     "        public void closeSession() {\n"
-     "            DiagnosticLog.log(\"stream\", \"closeSession_begin\", \"thread=\" + Thread.currentThread().getName());\n"
-     "            clearRenderSurface();\n"
-     "            StallWatchdog.runBounded(\"stream\", \"webrtc_closeSession\", 1200, () -> webRtcReceiver.closeSession());\n"
-     "            DiagnosticLog.log(\"stream\", \"closeSession_end\", \"\");\n"
-     "        }\n",
-     "bounded wait when closing the WebRTC session")
-
-# 6b. Flow counters: are video frames arriving, are controller inputs being sent?
-edit(SERVICE,
-     "                    if (eglRenderer != null) {\n                        eglRenderer.onFrame(frame);\n                    }\n",
-     "                    StallWatchdog.framesIn.incrementAndGet();\n"
-     "                    if (eglRenderer != null) {\n                        eglRenderer.onFrame(frame);\n                    }\n",
-     "count video frames received")
-edit(SERVICE,
-     "        public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {\n            if (binary != null) {\n",
-     "        public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {\n"
-     "            StallWatchdog.inputSends.incrementAndGet();\n"
-     "            if (binary != null) {\n",
-     "count controller messages sent")
-edit(SERVICE,
-     "                DiagnosticLog.logMemory(\"stream\");\n                callbackHandler.postDelayed(this, 3000);\n",
-     "                DiagnosticLog.logMemory(\"stream\");\n"
-     "                DiagnosticLog.log(\"stream\", \"flow\", StallWatchdog.flowSnapshot());\n"
-     "                callbackHandler.postDelayed(this, 3000);\n",
-     "log frame/input flow every 3 s")
-edit(SERVICE,
-     "    public void onDataChannelStateChanged(String label, String state) {\n"
-     "        broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));\n",
-     "    public void onDataChannelStateChanged(String label, String state) {\n"
-     "        DiagnosticLog.log(\"stream\", \"datachannel_state\", label + \" = \" + state);\n"
-     "        broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));\n",
-     "log data channel (controller input) state")
-
-
-# ---- 7. WEBSITE RELOAD DIAGNOSIS (the "website reboots when I start a game" problem) ----
-# The site script (index.js) reloads the whole page 3 s after load when the page body has the
-# class "legacyBackground". These edits record every page load, page error, relevant console
-# message, the moment that reload fires, and whether the stream handover started.
-NET_HELPERS = '''    private int diagNetLogCount = 0;
-    private int diagConsoleCount = 0;
-
-    private void diagConsole(ConsoleMessage m) {
-        try {
-            String msg = m.message();
-            if (msg == null) return;
-            boolean interesting = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
-                    || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING
-                    || msg.contains("Bx")
-                    || msg.contains("Unsupported")
-                    || msg.toLowerCase(java.util.Locale.ROOT).contains("reload");
-            if (!interesting || diagConsoleCount >= 150) return;
-            diagConsoleCount++;
-            String shown = msg.length() > 300 ? msg.substring(0, 300) : msg;
-            DiagnosticLog.log("main", "console_" + m.messageLevel(), shown + " @" + m.sourceId() + ":" + m.lineNumber());
-        } catch (Throwable ignored) {
-        }
-    }
-
-'''
-edit(JAVA,
-     "    private void showDiagnostic(String title, String text) {\n",
-     NET_HELPERS + "    private void showDiagnostic(String title, String text) {\n",
-     "web diagnostics helpers")
-
-edit(JAVA,
-     "                Log.i(TAG, \"Page started: \" + url);\n",
-     "                Log.i(TAG, \"Page started: \" + url);\n"
-     "                DiagnosticLog.log(\"main\", \"page_started\", String.valueOf(url));\n",
-     "log page start")
-
-edit(JAVA,
-     "                super.onPageFinished(view, url);\n                setWebviewVisible();\n",
-     "                super.onPageFinished(view, url);\n"
-     "                DiagnosticLog.log(\"main\", \"page_finished\", url + \" | textZoom=\" + view.getSettings().getTextZoom()\n"
-     "                        + \" | ua=\" + view.getSettings().getUserAgentString());\n"
-     "                setWebviewVisible();\n",
-     "log page finish with user agent")
-
-edit(JAVA,
-     "            @Override\n            public void onPageFinished(WebView view, String url) {\n",
-     "            @Override\n"
-     "            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse errorResponse) {\n"
-     "                try {\n"
-     "                    if (diagNetLogCount < 80) {\n"
-     "                        diagNetLogCount++;\n"
-     "                        DiagnosticLog.log(\"main\", \"http_error\", errorResponse.getStatusCode() + \" \" + request.getMethod() + \" \" + request.getUrl()\n"
-     "                                + (request.isForMainFrame() ? \" (main frame)\" : \"\"));\n"
-     "                    }\n"
-     "                } catch (Throwable ignored) {\n"
-     "                }\n"
-     "            }\n\n"
-     "            @Override\n"
-     "            public void onReceivedError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceError error) {\n"
-     "                try {\n"
-     "                    if (diagNetLogCount < 80) {\n"
-     "                        diagNetLogCount++;\n"
-     "                        DiagnosticLog.log(\"main\", \"load_error\", error.getErrorCode() + \" \" + error.getDescription() + \" \" + request.getUrl()\n"
-     "                                + (request.isForMainFrame() ? \" (main frame)\" : \"\"));\n"
-     "                    }\n"
-     "                } catch (Throwable ignored) {\n"
-     "                }\n"
-     "            }\n\n"
-     "            @Override\n            public void onPageFinished(WebView view, String url) {\n",
-     "log page and network errors")
-
-edit(JAVA,
-     "            Log.d(TAG, \"WebView Console: \" + consoleMessage.message());\n",
-     "            Log.d(TAG, \"WebView Console: \" + consoleMessage.message());\n"
-     "            diagConsole(consoleMessage);\n",
-     "log important website console messages")
-
-edit(JAVA,
-     "    public void onPeerConnectionConfigReceived(String configJson) {\n",
-     "    public void onPeerConnectionConfigReceived(String configJson) {\n"
-     "        DiagnosticLog.log(\"main\", \"handover_peer_config\", \"received, length=\" + (configJson == null ? -1 : configJson.length()));\n",
-     "log when the stream handover begins")
-
-edit(ASSET_JS,
-     "{ window.stop(), window.location.reload(!0);}",
-     "{ console.log(\"[BxC] legacyBackground found -> RELOADING page. url=\" + location.href + \" | ua=\" + navigator.userAgent); window.stop(), window.location.reload(!0);}",
-     "log when the script reloads the page")
-
-
-# ---- 8. THE FREEZE: FIX FOR THE ROOT CAUSE (verified from your phone's stack traces) --------
-# Evidence: (1) the video render thread was inside PeerConnection.getStats, called from
-# WebRtcReceiver.onLogMessage; (2) the library's EglRenderer.logStatistics calls that log
-# callback while holding statisticsLock, and EglRenderer.onFrame needs the same lock first,
-# so frame delivery stops (your log: frames per 3 s dropped from ~90 to 0 while controller
-# input kept flowing); (3) the exit call then hung in VideoTrack.removeSink. The fork added
-# that getStats call (only active while the performance overlay is on); the original app only
-# forwards a text string. Fix: never make the blocking call on that thread.
+# 5c. THE FIX: the statistics request no longer runs on the video render thread.
 OLD_LOG_CALLBACK = """    @Override
     public void onLogMessage(String message, Logging.Severity severity, String tag) {
 
@@ -593,15 +247,211 @@ NEW_LOG_CALLBACK = """    private final java.util.concurrent.atomic.AtomicBoolea
     }
 """
 edit(WEBRTC, OLD_LOG_CALLBACK, NEW_LOG_CALLBACK,
-     "move the stats request off the video render thread (root cause of the freeze)")
+     "move the stats request off the video render thread (the freeze fix)")
 
-# Exit safeguard, part 2: the exit call was also stuck detaching the video sink.
+# 5d. Safety net: Exit game / surface teardown can no longer hang the whole app.
 edit(SERVICE,
      "                    remoteTrack.removeSink(webRtcReceiver.getPendingRenderTarget());\n",
-     """                    final VideoTrack trackToDetach = remoteTrack;
-                    StallWatchdog.runBounded("stream", "remove_sink", 800,
-                            () -> trackToDetach.removeSink(webRtcReceiver.getPendingRenderTarget()));
-""",
+     "                    final VideoTrack trackToDetach = remoteTrack;\n"
+     "                    BoundedCall.run(\"stream\", \"remove_sink\", 800,\n"
+     "                            () -> trackToDetach.removeSink(webRtcReceiver.getPendingRenderTarget()));\n",
      "bounded wait when detaching the video sink")
+
+edit(SERVICE,
+     "                eglRenderer.release();\n                eglRenderer = null;\n            }\n"
+     "            if (serviceEglBase != null) {\n                serviceEglBase.release();\n                serviceEglBase = null;\n            }\n",
+     "                final org.webrtc.EglRenderer rendererToRelease = eglRenderer;\n"
+     "                eglRenderer = null;\n"
+     "                final EglBase eglBaseToRelease = serviceEglBase;\n"
+     "                serviceEglBase = null;\n"
+     "                BoundedCall.run(\"stream\", \"egl_release\", 800, () -> {\n"
+     "                    rendererToRelease.release();\n"
+     "                    if (eglBaseToRelease != null) eglBaseToRelease.release();\n"
+     "                });\n"
+     "            }\n"
+     "            if (serviceEglBase != null) {\n"
+     "                final EglBase eglBaseOnly = serviceEglBase;\n"
+     "                serviceEglBase = null;\n"
+     "                BoundedCall.run(\"stream\", \"egl_base_release\", 800, () -> eglBaseOnly.release());\n"
+     "            }\n",
+     "bounded wait when releasing the video renderer")
+
+edit(SERVICE,
+     "        public void closeSession() {\n            clearRenderSurface();\n            webRtcReceiver.closeSession();\n        }\n",
+     "        public void closeSession() {\n"
+     "            clearRenderSurface();\n"
+     "            BoundedCall.run(\"stream\", \"webrtc_closeSession\", 1200, () -> webRtcReceiver.closeSession());\n"
+     "        }\n",
+     "bounded wait when closing the WebRTC session")
+
+# ---- 6. THE SMALL LEAK: the 3-second logger loop was never stopped -----------------------
+edit(SERVICE,
+     "    private volatile boolean nativeGamepadEnabledMirror = false;\n",
+     "    private volatile boolean nativeGamepadEnabledMirror = false;\n    private Runnable memSnapshotRunnable;\n",
+     "leak fix (service): keep a handle on the logger loop")
+edit(SERVICE,
+     "        final Runnable memSnapshot = new Runnable() {\n",
+     "        memSnapshotRunnable = new Runnable() {\n",
+     "leak fix (service): loop becomes a field")
+edit(SERVICE,
+     "        callbackHandler.postDelayed(memSnapshot, 3000);\n",
+     "        callbackHandler.postDelayed(memSnapshotRunnable, 3000);\n",
+     "leak fix (service): start the field loop")
+edit(SERVICE,
+     "        callbacks.kill();\n        super.onDestroy();\n",
+     "        if (callbackHandler != null && memSnapshotRunnable != null) callbackHandler.removeCallbacks(memSnapshotRunnable);\n"
+     "        callbacks.kill();\n        super.onDestroy();\n",
+     "leak fix (service): stop the loop when the service stops")
+
+edit(JAVA,
+     "        final Handler diagHandler = new Handler(Looper.getMainLooper());\n        final Runnable memSnapshot = new Runnable() {\n",
+     "        diagHandler = new Handler(Looper.getMainLooper());\n        memSnapshotRunnable = new Runnable() {\n",
+     "leak fix (app): logger loop becomes a field")
+edit(JAVA,
+     "        diagHandler.postDelayed(memSnapshot, 3000);\n",
+     "        diagHandler.postDelayed(memSnapshotRunnable, 3000);\n",
+     "leak fix (app): start the field loop")
+edit(JAVA,
+     "        super.onDestroy();\n",
+     "        if (diagHandler != null && memSnapshotRunnable != null) diagHandler.removeCallbacks(memSnapshotRunnable);\n"
+     "        super.onDestroy();\n",
+     "leak fix (app): stop the loop when the screen is destroyed")
+
+# ---- 7. ASPECT RATIO BUTTON in the in-game menu ----------------------------------------
+# Verified in your logs: the stream arrives as 1920x1080 (16:9) and the app draws it onto the
+# full 2400x1080 phone surface, which is the stretch you see. This button changes only the size
+# of the video box on your phone (client side): 16:9, 18:9, or Stretch (full screen = as before).
+edit(JAVA,
+     '    private static final String KEY_USE_UNRELIABLE_INPUT = "use_unreliable_input";\n',
+     '    private static final String KEY_USE_UNRELIABLE_INPUT = "use_unreliable_input";\n'
+     '    private static final String KEY_ASPECT_MODE = "aspect_mode";\n',
+     "aspect ratio: preference key")
+
+ASPECT_CODE = """    // ---- Aspect ratio + small helpers (added by apply_fixes.py) ----
+    private Handler diagHandler;
+    private Runnable memSnapshotRunnable;
+    private int aspectMode = 0; // 0 = Stretch (full screen, the original look), 1 = 16:9, 2 = 18:9
+
+    private String aspectModeLabel() {
+        switch (aspectMode) {
+            case 1:
+                return "Aspect ratio: 16:9";
+            case 2:
+                return "Aspect ratio: 18:9";
+            default:
+                return "Aspect ratio: Stretch (full screen)";
+        }
+    }
+
+    private void cycleAspectMode() {
+        aspectMode = (aspectMode + 1) % 3;
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putInt(KEY_ASPECT_MODE, aspectMode).apply();
+        applyAspectMode();
+    }
+
+    /** Sizes the video box: fit inside the screen at the chosen ratio, centred; black elsewhere. */
+    private void applyAspectMode() {
+        if (rootLayout == null || surfaceView == null) return;
+        int w = rootLayout.getWidth();
+        int h = rootLayout.getHeight();
+        if (w <= 0 || h <= 0) return;
+        float target = aspectMode == 1 ? 16f / 9f : (aspectMode == 2 ? 2f : 0f);
+        int newW = ViewGroup.LayoutParams.MATCH_PARENT;
+        int newH = ViewGroup.LayoutParams.MATCH_PARENT;
+        if (target > 0f) {
+            if ((float) w / (float) h >= target) {
+                newH = h;
+                newW = Math.round(h * target);
+            } else {
+                newW = w;
+                newH = Math.round(w / target);
+            }
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
+        if (lp.width != newW || lp.height != newH) {
+            lp.width = newW;
+            lp.height = newH;
+            lp.gravity = android.view.Gravity.CENTER;
+            surfaceView.setLayoutParams(lp);
+        }
+    }
+
+    /** Quietly records how the app's previous processes ended (Android 11+), to the debug log only. */
+    private void logPreviousExits() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> exits = am.getHistoricalProcessExitReasons(null, 0, 3);
+            if (exits == null || exits.isEmpty()) return;
+            StringBuilder sb = new StringBuilder();
+            for (android.app.ApplicationExitInfo e : exits) {
+                sb.append(e.getProcessName()).append(" reason=").append(e.getReason())
+                        .append(" (").append(e.getDescription()).append(") ")
+                        .append((System.currentTimeMillis() - e.getTimestamp()) / 60000).append(" min ago\\n");
+            }
+            DiagnosticLog.log("main", "previous_exits", sb.toString().trim());
+        } catch (Throwable ignored) {
+        }
+    }
+
+"""
+edit(JAVA,
+     "    private void pushSurfaceIfReady() {\n",
+     ASPECT_CODE + "    private void pushSurfaceIfReady() {\n",
+     "aspect ratio: logic")
+
+edit(JAVA,
+     "        surfaceView = findViewById(R.id.surfaceView);\n",
+     "        surfaceView = findViewById(R.id.surfaceView);\n"
+     "        aspectMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_ASPECT_MODE, 0);\n"
+     "        rootLayout.setBackgroundColor(android.graphics.Color.BLACK);\n"
+     "        rootLayout.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {\n"
+     "            if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {\n"
+     "                rootLayout.post(this::applyAspectMode);\n"
+     "            }\n"
+     "        });\n",
+     "aspect ratio: load saved choice and follow screen size changes")
+
+edit(JAVA,
+     "        setContentView(R.layout.activity_main);\n",
+     "        setContentView(R.layout.activity_main);\n        logPreviousExits();\n",
+     "record how the app last stopped (log only)")
+
+edit(JAVA,
+     "        btnExportDiagLog.setOnClickListener(v -> exportDiagnosticLog());\n",
+     "        btnExportDiagLog.setOnClickListener(v -> exportDiagnosticLog());\n"
+     "        Button btnAspect = dialog.findViewById(R.id.btn_aspect_ratio);\n"
+     "        btnAspect.setText(aspectModeLabel());\n"
+     "        btnAspect.setOnClickListener(v -> {\n"
+     "            cycleAspectMode();\n"
+     "            btnAspect.setText(aspectModeLabel());\n"
+     "        });\n",
+     "aspect ratio: button wiring")
+
+edit(JAVA,
+     "            btnMic.setVisibility(View.GONE);\n",
+     "            btnMic.setVisibility(View.GONE);\n            btnAspect.setVisibility(View.GONE);\n",
+     "aspect ratio: hide the button when no game is running")
+
+edit(LAYOUT + "dialog_streaming_menu.xml",
+     '    <androidx.appcompat.widget.AppCompatButton\n        android:id="@+id/btn_settings"\n',
+     '    <androidx.appcompat.widget.AppCompatButton\n'
+     '        android:id="@+id/btn_aspect_ratio"\n'
+     '        android:layout_width="match_parent"\n'
+     '        android:layout_height="wrap_content"\n'
+     '        android:text="Aspect ratio: Stretch (full screen)"\n'
+     '        android:textColor="@color/selector_text_xbox"\n'
+     '        android:textAllCaps="false"\n'
+     '        android:textSize="14sp"\n'
+     '        android:gravity="start|center_vertical"\n'
+     '        android:paddingStart="16dp"\n'
+     '        android:paddingTop="12dp"\n'
+     '        android:paddingBottom="12dp"\n'
+     '        android:background="@drawable/selector_button_xbox"\n'
+     '        android:focusable="true"\n'
+     '        android:layout_marginBottom="6dp"/>\n\n'
+     '    <androidx.appcompat.widget.AppCompatButton\n        android:id="@+id/btn_settings"\n',
+     "aspect ratio: menu button")
 
 print("\nDone." if changed else "\nNothing to change.")
