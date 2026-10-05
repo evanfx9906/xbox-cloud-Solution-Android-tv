@@ -256,13 +256,15 @@ public class StreamingService extends Service implements StreamHost {
                 // without storing it. But clearRenderSurface is usually called
                 // on session end or surface destruction.
                 if (remoteTrack != null && webRtcReceiver.getPendingRenderTarget() != null) {
-                    remoteTrack.removeSink(webRtcReceiver.getPendingRenderTarget());
+                    final VideoTrack trackToDetach = remoteTrack;
+                    StallWatchdog.runBounded("stream", "remove_sink", 800,
+                            () -> trackToDetach.removeSink(webRtcReceiver.getPendingRenderTarget()));
                 }
                 final org.webrtc.EglRenderer rendererToRelease = eglRenderer;
                 eglRenderer = null;
                 final EglBase eglBaseToRelease = serviceEglBase;
                 serviceEglBase = null;
-                StallWatchdog.runBounded("stream", "egl_release", 1200, () -> {
+                StallWatchdog.runBounded("stream", "egl_release", 800, () -> {
                     rendererToRelease.release();
                     if (eglBaseToRelease != null) eglBaseToRelease.release();
                 });
@@ -270,7 +272,7 @@ public class StreamingService extends Service implements StreamHost {
             if (serviceEglBase != null) {
                 final EglBase eglBaseOnly = serviceEglBase;
                 serviceEglBase = null;
-                StallWatchdog.runBounded("stream", "egl_base_release", 1200, () -> eglBaseOnly.release());
+                StallWatchdog.runBounded("stream", "egl_base_release", 800, () -> eglBaseOnly.release());
             }
         }
 
@@ -316,7 +318,7 @@ public class StreamingService extends Service implements StreamHost {
         public void closeSession() {
             DiagnosticLog.log("stream", "closeSession_begin", "thread=" + Thread.currentThread().getName());
             clearRenderSurface();
-            StallWatchdog.runBounded("stream", "webrtc_closeSession", 1800, () -> webRtcReceiver.closeSession());
+            StallWatchdog.runBounded("stream", "webrtc_closeSession", 1200, () -> webRtcReceiver.closeSession());
             DiagnosticLog.log("stream", "closeSession_end", "");
         }
 

@@ -590,20 +590,45 @@ private boolean showStats=false;
         }
     }
 
+    private final java.util.concurrent.atomic.AtomicBoolean statsInFlight =
+            new java.util.concurrent.atomic.AtomicBoolean(false);
+    private final java.util.concurrent.ExecutorService statsExecutor =
+            java.util.concurrent.Executors.newSingleThreadExecutor(r -> {
+                Thread t = new Thread(r, "stats-collector");
+                t.setDaemon(true);
+                return t;
+            });
+
     @Override
     public void onLogMessage(String message, Logging.Severity severity, String tag) {
-
+        // This callback runs on the video render thread while it holds a lock that frame
+        // delivery needs. A blocking WebRTC call here can freeze the video, so the stats
+        // request is handed to a helper thread, one at a time (skipped while one is pending).
         if (showStats && message != null && message.startsWith("stream-rendererDuration:") && peerConnection != null) {
-            try {
-                peerConnection.getStats(report -> {
-                    String stats = buildLiveNetworkStatsString(report);
-                    if (signalingListener != null) {
-                        signalingListener.onPerformanceStatsReceived(stats);
+            final PeerConnection pcForStats = peerConnection;
+            if (statsInFlight.compareAndSet(false, true)) {
+                statsExecutor.execute(() -> {
+                    try {
+                        if (pcForStats != peerConnection) {
+                            statsInFlight.set(false);
+                            return;
+                        }
+                        pcForStats.getStats(report -> {
+                            try {
+                                String stats = buildLiveNetworkStatsString(report);
+                                if (signalingListener != null) {
+                                    signalingListener.onPerformanceStatsReceived(stats);
+                                }
+                            } finally {
+                                statsInFlight.set(false);
+                            }
+                        });
+                    } catch (Exception e) {
+                        statsInFlight.set(false);
+                        Log.e(TAG, "Failed to collect live stats", e);
+                        DiagnosticLog.logException("stream", "getStats_fail", e);
                     }
                 });
-            } catch (Exception e) {
-                Log.e(TAG, "Failed to collect live stats", e);
-                DiagnosticLog.logException("stream", "getStats_fail", e);
             }
         }
     }

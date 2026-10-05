@@ -592,7 +592,7 @@ public class MainActivity extends AppCompatActivity {
                 final String info = "didCrash=" + detail.didCrash()
                         + " (false = killed by the system, usually low memory)";
                 DiagnosticLog.log("main", "RENDER_PROCESS_GONE", info);
-                runOnUiThread(() -> showDiagnostic("Build v6 - WebView process died", info));
+                runOnUiThread(() -> showDiagnostic("Build v7 - WebView process died", info));
                 return true;
             }
 
@@ -752,7 +752,7 @@ public class MainActivity extends AppCompatActivity {
             }
             String text = sb.toString().trim();
             DiagnosticLog.log("main", "previous_exits", text);
-            showDiagnostic("Build v6 - how the app last stopped", text);
+            showDiagnostic("Build v7 - how the app last stopped", text);
         } catch (Throwable t) {
             DiagnosticLog.logException("main", "exit_info_fail", t);
         }
