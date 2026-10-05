@@ -106,6 +106,7 @@ public class MainActivity extends AppCompatActivity {
     private static final String KEY_INITIAL_SCALE = "target_initial_scale";
     private static final String KEY_SHOW_HELP = "show_intro_help";
     private static final String KEY_USE_UNRELIABLE_INPUT = "use_unreliable_input";
+    private static final String KEY_ASPECT_MODE = "aspect_mode";
 
     private static final java.util.Map<String, String> USER_AGENTS = new java.util.HashMap<String, String>() {{
         put("default", ""); // Empty uses system default
@@ -330,8 +331,7 @@ public class MainActivity extends AppCompatActivity {
         SplashScreen splashScreen = SplashScreen.installSplashScreen(this);
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
-        new Handler(Looper.getMainLooper()).postDelayed(this::diagShowLastExits, 2000);
-        StallWatchdog.startMainThreadWatch("main");
+        logPreviousExits();
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -430,6 +430,13 @@ public class MainActivity extends AppCompatActivity {
 
         rootLayout = findViewById(R.id.rootLayout);
         surfaceView = findViewById(R.id.surfaceView);
+        aspectMode = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getInt(KEY_ASPECT_MODE, 0);
+        rootLayout.setBackgroundColor(android.graphics.Color.BLACK);
+        rootLayout.addOnLayoutChangeListener((v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> {
+            if ((right - left) != (oldRight - oldLeft) || (bottom - top) != (oldBottom - oldTop)) {
+                rootLayout.post(this::applyAspectMode);
+            }
+        });
         loadingLayout = findViewById(R.id.loadingLayout);
         loadingText = findViewById(R.id.loadingText);
 
@@ -451,15 +458,15 @@ public class MainActivity extends AppCompatActivity {
         });
 
         // --- Surgical addition: periodic memory snapshot for diagnostics, every 3s.
-        final Handler diagHandler = new Handler(Looper.getMainLooper());
-        final Runnable memSnapshot = new Runnable() {
+        diagHandler = new Handler(Looper.getMainLooper());
+        memSnapshotRunnable = new Runnable() {
             @Override
             public void run() {
                 DiagnosticLog.logMemory("main");
                 diagHandler.postDelayed(this, 3000);
             }
         };
-        diagHandler.postDelayed(memSnapshot, 3000);
+        diagHandler.postDelayed(memSnapshotRunnable, 3000);
 
 
         audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -511,6 +518,74 @@ public class MainActivity extends AppCompatActivity {
 
         showIntroHelpDialog();
     }
+    // ---- Aspect ratio + small helpers (added by apply_fixes.py) ----
+    private Handler diagHandler;
+    private Runnable memSnapshotRunnable;
+    private int aspectMode = 0; // 0 = Stretch (full screen, the original look), 1 = 16:9, 2 = 18:9
+
+    private String aspectModeLabel() {
+        switch (aspectMode) {
+            case 1:
+                return "Aspect ratio: 16:9";
+            case 2:
+                return "Aspect ratio: 18:9";
+            default:
+                return "Aspect ratio: Stretch (full screen)";
+        }
+    }
+
+    private void cycleAspectMode() {
+        aspectMode = (aspectMode + 1) % 3;
+        getSharedPreferences(PREFS_NAME, MODE_PRIVATE).edit().putInt(KEY_ASPECT_MODE, aspectMode).apply();
+        applyAspectMode();
+    }
+
+    /** Sizes the video box: fit inside the screen at the chosen ratio, centred; black elsewhere. */
+    private void applyAspectMode() {
+        if (rootLayout == null || surfaceView == null) return;
+        int w = rootLayout.getWidth();
+        int h = rootLayout.getHeight();
+        if (w <= 0 || h <= 0) return;
+        float target = aspectMode == 1 ? 16f / 9f : (aspectMode == 2 ? 2f : 0f);
+        int newW = ViewGroup.LayoutParams.MATCH_PARENT;
+        int newH = ViewGroup.LayoutParams.MATCH_PARENT;
+        if (target > 0f) {
+            if ((float) w / (float) h >= target) {
+                newH = h;
+                newW = Math.round(h * target);
+            } else {
+                newW = w;
+                newH = Math.round(w / target);
+            }
+        }
+        FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) surfaceView.getLayoutParams();
+        if (lp.width != newW || lp.height != newH) {
+            lp.width = newW;
+            lp.height = newH;
+            lp.gravity = android.view.Gravity.CENTER;
+            surfaceView.setLayoutParams(lp);
+        }
+    }
+
+    /** Quietly records how the app's previous processes ended (Android 11+), to the debug log only. */
+    private void logPreviousExits() {
+        if (Build.VERSION.SDK_INT < 30) return;
+        try {
+            android.app.ActivityManager am =
+                    (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            java.util.List<android.app.ApplicationExitInfo> exits = am.getHistoricalProcessExitReasons(null, 0, 3);
+            if (exits == null || exits.isEmpty()) return;
+            StringBuilder sb = new StringBuilder();
+            for (android.app.ApplicationExitInfo e : exits) {
+                sb.append(e.getProcessName()).append(" reason=").append(e.getReason())
+                        .append(" (").append(e.getDescription()).append(") ")
+                        .append((System.currentTimeMillis() - e.getTimestamp()) / 60000).append(" min ago\n");
+            }
+            DiagnosticLog.log("main", "previous_exits", sb.toString().trim());
+        } catch (Throwable ignored) {
+        }
+    }
+
     private void pushSurfaceIfReady() {
         if (streamingService == null) return;
         surfaceView.disableFpsReduction();
@@ -588,43 +663,8 @@ public class MainActivity extends AppCompatActivity {
         webSettings.setDatabaseEnabled(true);
         webView.setWebViewClient(new WebViewClient() {
             @Override
-            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
-                final String info = "didCrash=" + detail.didCrash()
-                        + " (false = killed by the system, usually low memory)";
-                DiagnosticLog.log("main", "RENDER_PROCESS_GONE", info);
-                runOnUiThread(() -> showDiagnostic("Build v7 - WebView process died", info));
-                return true;
-            }
-
-            @Override
-            public void onReceivedHttpError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceResponse errorResponse) {
-                try {
-                    if (diagNetLogCount < 80) {
-                        diagNetLogCount++;
-                        DiagnosticLog.log("main", "http_error", errorResponse.getStatusCode() + " " + request.getMethod() + " " + request.getUrl()
-                                + (request.isForMainFrame() ? " (main frame)" : ""));
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-
-            @Override
-            public void onReceivedError(WebView view, android.webkit.WebResourceRequest request, android.webkit.WebResourceError error) {
-                try {
-                    if (diagNetLogCount < 80) {
-                        diagNetLogCount++;
-                        DiagnosticLog.log("main", "load_error", error.getErrorCode() + " " + error.getDescription() + " " + request.getUrl()
-                                + (request.isForMainFrame() ? " (main frame)" : ""));
-                    }
-                } catch (Throwable ignored) {
-                }
-            }
-
-            @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
-                DiagnosticLog.log("main", "page_finished", url + " | textZoom=" + view.getSettings().getTextZoom()
-                        + " | ua=" + view.getSettings().getUserAgentString());
                 setWebviewVisible();
 
                 // Inject viewport meta tag to force fit
@@ -665,7 +705,6 @@ public class MainActivity extends AppCompatActivity {
                 view.setVisibility(WebView.GONE);
                 super.onPageStarted(view, url, favicon);
                 Log.i(TAG, "Page started: " + url);
-                DiagnosticLog.log("main", "page_started", String.valueOf(url));
                 if (webView != null && webView.getWebChromeClient() instanceof CustomWebChromeClient) {
                     ((CustomWebChromeClient) webView.getWebChromeClient()).resetInjection();
                 }
@@ -687,83 +726,6 @@ public class MainActivity extends AppCompatActivity {
             performanceDialog.dismiss();
         }
     }
-    // ---- Crash diagnostics (added by apply_fixes.py) ----
-    private int diagNetLogCount = 0;
-    private int diagConsoleCount = 0;
-
-    private void diagConsole(ConsoleMessage m) {
-        try {
-            String msg = m.message();
-            if (msg == null) return;
-            boolean interesting = m.messageLevel() == ConsoleMessage.MessageLevel.ERROR
-                    || m.messageLevel() == ConsoleMessage.MessageLevel.WARNING
-                    || msg.contains("Bx")
-                    || msg.contains("Unsupported")
-                    || msg.toLowerCase(java.util.Locale.ROOT).contains("reload");
-            if (!interesting || diagConsoleCount >= 150) return;
-            diagConsoleCount++;
-            String shown = msg.length() > 300 ? msg.substring(0, 300) : msg;
-            DiagnosticLog.log("main", "console_" + m.messageLevel(), shown + " @" + m.sourceId() + ":" + m.lineNumber());
-        } catch (Throwable ignored) {
-        }
-    }
-
-    private void showDiagnostic(String title, String text) {
-        new androidx.appcompat.app.AlertDialog.Builder(this)
-                .setTitle(title)
-                .setMessage(text)
-                .setPositiveButton("OK", null)
-                .show();
-    }
-
-    private void diagShowLastExits() {
-        if (Build.VERSION.SDK_INT < 30) return;
-        try {
-            android.app.ActivityManager am =
-                    (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
-            java.util.List<android.app.ApplicationExitInfo> exits =
-                    am.getHistoricalProcessExitReasons(null, 0, 5);
-            if (exits == null || exits.isEmpty()) return;
-            long now = System.currentTimeMillis();
-            StringBuilder sb = new StringBuilder();
-            for (android.app.ApplicationExitInfo e : exits) {
-                String reason;
-                switch (e.getReason()) {
-                    case android.app.ApplicationExitInfo.REASON_CRASH: reason = "CRASH (Java exception)"; break;
-                    case android.app.ApplicationExitInfo.REASON_CRASH_NATIVE: reason = "CRASH_NATIVE"; break;
-                    case android.app.ApplicationExitInfo.REASON_ANR: reason = "ANR (not responding)"; break;
-                    case android.app.ApplicationExitInfo.REASON_LOW_MEMORY: reason = "LOW_MEMORY (killed by system)"; break;
-                    case android.app.ApplicationExitInfo.REASON_SIGNALED: reason = "SIGNALED (killed)"; break;
-                    case android.app.ApplicationExitInfo.REASON_EXCESSIVE_RESOURCE_USAGE: reason = "EXCESSIVE_RESOURCE_USAGE"; break;
-                    case android.app.ApplicationExitInfo.REASON_USER_REQUESTED: reason = "USER_REQUESTED"; break;
-                    case android.app.ApplicationExitInfo.REASON_USER_STOPPED: reason = "USER_STOPPED"; break;
-                    case android.app.ApplicationExitInfo.REASON_EXIT_SELF: reason = "EXIT_SELF"; break;
-                    case android.app.ApplicationExitInfo.REASON_DEPENDENCY_DIED: reason = "DEPENDENCY_DIED"; break;
-                    case android.app.ApplicationExitInfo.REASON_PERMISSION_CHANGE: reason = "PERMISSION_CHANGE"; break;
-                    case android.app.ApplicationExitInfo.REASON_INITIALIZATION_FAILURE: reason = "INITIALIZATION_FAILURE"; break;
-                    case android.app.ApplicationExitInfo.REASON_OTHER: reason = "OTHER"; break;
-                    default: reason = "code " + e.getReason();
-                }
-                sb.append(e.getProcessName()).append(" - ").append(reason)
-                        .append("\n   ").append((now - e.getTimestamp()) / 60000).append(" min ago")
-                        .append(", status ").append(e.getStatus())
-                        .append(", rss ").append(e.getRss() / 1024).append(" MB")
-                        .append("\n   ").append(e.getDescription()).append("\n\n");
-            }
-            String text = sb.toString().trim();
-            DiagnosticLog.log("main", "previous_exits", text);
-            showDiagnostic("Build v7 - how the app last stopped", text);
-        } catch (Throwable t) {
-            DiagnosticLog.logException("main", "exit_info_fail", t);
-        }
-    }
-
-    @Override
-    public void onTrimMemory(int level) {
-        super.onTrimMemory(level);
-        DiagnosticLog.log("main", "onTrimMemory", "level=" + level);
-    }
-
 private boolean debug=false;
     public void showCustomToast(final String message) {
         runOnUiThread(() -> {
@@ -870,7 +832,6 @@ private boolean debug=false;
 // called webRtcReceiver.setSignalingListener(null)/createPeerConnection(finalServers)/setupSignalingListener()):
 
     public void onPeerConnectionConfigReceived(String configJson) {
-        DiagnosticLog.log("main", "handover_peer_config", "received, length=" + (configJson == null ? -1 : configJson.length()));
         if (configJson == null || configJson.equals("null") || configJson.isEmpty()) {
             return;
         }
@@ -1174,6 +1135,7 @@ private boolean debug=false;
             webView = null;
         }
 
+        if (diagHandler != null && memSnapshotRunnable != null) diagHandler.removeCallbacks(memSnapshotRunnable);
         super.onDestroy();
     }
 
@@ -1196,7 +1158,6 @@ private boolean debug=false;
         @Override
         public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
             Log.d(TAG, "WebView Console: " + consoleMessage.message());
-            diagConsole(consoleMessage);
             return true;
         }
     }
@@ -1232,11 +1193,18 @@ private boolean debug=false;
         Button btnClose = dialog.findViewById(R.id.btn_close_dialog);
         Button btnExportDiagLog = dialog.findViewById(R.id.btn_export_diag_log);
         btnExportDiagLog.setOnClickListener(v -> exportDiagnosticLog());
+        Button btnAspect = dialog.findViewById(R.id.btn_aspect_ratio);
+        btnAspect.setText(aspectModeLabel());
+        btnAspect.setOnClickListener(v -> {
+            cycleAspectMode();
+            btnAspect.setText(aspectModeLabel());
+        });
         if(!isStreaming()){
             btnExit.setVisibility(View.GONE);
             btnPerformanceToggle.setVisibility(View.GONE);
             btnNexus.setVisibility(View.GONE);
             btnMic.setVisibility(View.GONE);
+            btnAspect.setVisibility(View.GONE);
         }
 
         // Initial Mic State

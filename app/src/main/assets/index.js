@@ -882,7 +882,7 @@ window.addEventListener("load", (e) => {
 window.setTimeout(() => {
 patchRtcPeerConnection();
 if (document.body.classList.contains("legacyBackground"))
-{ console.log("[BxC] legacyBackground found -> RELOADING page. url=" + location.href + " | ua=" + navigator.userAgent); window.stop(), window.location.reload(!0);}
+{ window.stop(), window.location.reload(!0);}
 }, 3000);
 InitBc();
 });

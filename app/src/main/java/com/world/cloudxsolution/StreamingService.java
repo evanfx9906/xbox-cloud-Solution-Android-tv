@@ -63,6 +63,7 @@ public class StreamingService extends Service implements StreamHost {
     // are checked on the hot input/data-channel path (see StreamHost javadoc).
     private volatile boolean isStreamingMirror = false;
     private volatile boolean nativeGamepadEnabledMirror = false;
+    private Runnable memSnapshotRunnable;
 
     @Override
     public void onCreate() {
@@ -77,15 +78,14 @@ public class StreamingService extends Service implements StreamHost {
         setupNetworkBinding();
 
         // Surgical addition: periodic memory snapshot for diagnostics, every 3s.
-        final Runnable memSnapshot = new Runnable() {
+        memSnapshotRunnable = new Runnable() {
             @Override
             public void run() {
                 DiagnosticLog.logMemory("stream");
-                DiagnosticLog.log("stream", "flow", StallWatchdog.flowSnapshot());
                 callbackHandler.postDelayed(this, 3000);
             }
         };
-        callbackHandler.postDelayed(memSnapshot, 3000);
+        callbackHandler.postDelayed(memSnapshotRunnable, 3000);
     }
 
     private void setupNetworkBinding() {
@@ -232,7 +232,6 @@ public class StreamingService extends Service implements StreamHost {
                                 frame.getRotatedWidth() + "x" + frame.getRotatedHeight());
                         onFirstFrameRendered(frame.getRotatedWidth(), frame.getRotatedHeight());
                     }
-                    StallWatchdog.framesIn.incrementAndGet();
                     if (eglRenderer != null) {
                         eglRenderer.onFrame(frame);
                     }
@@ -257,14 +256,14 @@ public class StreamingService extends Service implements StreamHost {
                 // on session end or surface destruction.
                 if (remoteTrack != null && webRtcReceiver.getPendingRenderTarget() != null) {
                     final VideoTrack trackToDetach = remoteTrack;
-                    StallWatchdog.runBounded("stream", "remove_sink", 800,
+                    BoundedCall.run("stream", "remove_sink", 800,
                             () -> trackToDetach.removeSink(webRtcReceiver.getPendingRenderTarget()));
                 }
                 final org.webrtc.EglRenderer rendererToRelease = eglRenderer;
                 eglRenderer = null;
                 final EglBase eglBaseToRelease = serviceEglBase;
                 serviceEglBase = null;
-                StallWatchdog.runBounded("stream", "egl_release", 800, () -> {
+                BoundedCall.run("stream", "egl_release", 800, () -> {
                     rendererToRelease.release();
                     if (eglBaseToRelease != null) eglBaseToRelease.release();
                 });
@@ -272,7 +271,7 @@ public class StreamingService extends Service implements StreamHost {
             if (serviceEglBase != null) {
                 final EglBase eglBaseOnly = serviceEglBase;
                 serviceEglBase = null;
-                StallWatchdog.runBounded("stream", "egl_base_release", 800, () -> eglBaseOnly.release());
+                BoundedCall.run("stream", "egl_base_release", 800, () -> eglBaseOnly.release());
             }
         }
 
@@ -316,15 +315,12 @@ public class StreamingService extends Service implements StreamHost {
 
         @Override
         public void closeSession() {
-            DiagnosticLog.log("stream", "closeSession_begin", "thread=" + Thread.currentThread().getName());
             clearRenderSurface();
-            StallWatchdog.runBounded("stream", "webrtc_closeSession", 1200, () -> webRtcReceiver.closeSession());
-            DiagnosticLog.log("stream", "closeSession_end", "");
+            BoundedCall.run("stream", "webrtc_closeSession", 1200, () -> webRtcReceiver.closeSession());
         }
 
         @Override
         public void onDataChannelSend(String label, byte[] binary, String data, boolean isBinary) {
-            StallWatchdog.inputSends.incrementAndGet();
             if (binary != null) {
                // Log.i(TAG, "streamingService send data to: " + label + " (" + binary.length + " bytes)");
                 webRtcReceiver.sendDataChannelMessage(label, binary, isBinary);
@@ -467,7 +463,6 @@ public class StreamingService extends Service implements StreamHost {
 
     @Override
     public void onDataChannelStateChanged(String label, String state) {
-        DiagnosticLog.log("stream", "datachannel_state", label + " = " + state);
         broadcast(cb -> safe(() -> cb.onDataChannelStateChanged(label, state)));
     }
 
@@ -529,6 +524,7 @@ public class StreamingService extends Service implements StreamHost {
     public void onDestroy() {
         try { binder.clearRenderSurface(); } catch (android.os.RemoteException ignored) {}
         if (webRtcReceiver != null) webRtcReceiver.release();
+        if (callbackHandler != null && memSnapshotRunnable != null) callbackHandler.removeCallbacks(memSnapshotRunnable);
         callbacks.kill();
         super.onDestroy();
     }
