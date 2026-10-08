@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
-Edits for the CloudX fork (FINAL version, v8).
+Edits for the CloudX fork, LAB BRANCH copy of the final v8 script.
+Only difference from the main-branch script: the app installs as a SEPARATE app
+(package suffix .lab, label "Xbox Lab") so it never touches the working app (.fixed).
 
 Base = commit 72dc66f (your fork on Oct 3, before any script ran).
 Run with --reset (the workflow does) and the OWNED files below are first restored
@@ -120,12 +122,12 @@ for layout in ("dialog_app_settings.xml", "dialog_streaming_menu.xml", "dialog_i
 # ---- 4. Install next to your current app ------------------------------------------
 edit(GRADLE,
      "    buildTypes {\n        release {\n",
-     "    buildTypes {\n        debug {\n            applicationIdSuffix = \".fixed\"\n        }\n        release {\n",
-     "debug build installs as a separate app (.fixed)")
+     "    buildTypes {\n        debug {\n            applicationIdSuffix = \".lab\"\n        }\n        release {\n",
+     "debug build installs as a separate app (.lab)")
 edit(STRINGS,
      '<string name="app_name">cloudxSolution</string>',
-     '<string name="app_name">cloudxSolution Fixed</string>',
-     "app label 'cloudxSolution Fixed'")
+     '<string name="app_name">Xbox Lab</string>',
+     "app label 'Xbox Lab'")
 
 # ---- 5. SAFEGUARDS (quiet, no popups) ---------------------------------------------------
 # Verified from your phone's logs and stack traces: the freeze came from a WebRTC statistics
@@ -453,5 +455,316 @@ edit(LAYOUT + "dialog_streaming_menu.xml",
      '        android:layout_marginBottom="6dp"/>\n\n'
      '    <androidx.appcompat.widget.AppCompatButton\n        android:id="@+id/btn_settings"\n',
      "aspect ratio: menu button")
+
+
+# ---- 8. LAB ONLY: probe for the new Xbox site (play.xbox.com) -----------------------------
+# Purpose: find out what the new site does inside this app, WITHOUT streaming through it yet.
+# The old site script (index.js) is switched off in this lab app. A small diagnostics script
+# (assets/probe.js) runs at document start and records addresses (host + path only), request
+# kinds and statuses, workers, WebRTC use, page replacement, and a few yes/no page hints.
+# It never records cookies, headers, bodies, tokens, query strings, page text or account names.
+PROBE_JS = r'''/* Xbox Lab probe (diagnostics only). Runs at document start on play.xbox.com / www.xbox.com.
+ * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
+ * strings, fragments, page text or account names. Addresses are reduced to host + path with
+ * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
+ * to its debug log. */
+(function () {
+  try {
+    if (window.__labProbe) return;
+    window.__labProbe = true;
+
+    var T0 = Date.now();
+    var isTop = (window === window.top);
+    var buf = [];
+    var counts = {};
+    var sent = 0;
+    var MAX_EVENTS = 500;
+
+    function maskPath(p) {
+      return String(p || '').split('/').map(function (s) {
+        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{guid}';
+        if (/^[0-9a-f]{16,}$/i.test(s)) return '{hex}';
+        if (/^[0-9]{6,}$/.test(s)) return '{num}';
+        if (s.length > 40) return '{long}';
+        return s;
+      }).join('/');
+    }
+
+    function safeUrl(u) {
+      try {
+        var s = String(u);
+        if (/^blob:/i.test(s)) return 'blob:';
+        if (/^data:/i.test(s)) return 'data:';
+        var a = new URL(s, location.href);
+        return a.protocol + '//' + a.host + maskPath(a.pathname);
+      } catch (e) {
+        return 'unparsable';
+      }
+    }
+
+    function scrub(text) {
+      return String(text == null ? '' : text).replace(/https?:\/\/\S+/g, '{url}').slice(0, 120);
+    }
+
+    function emit(kind, detail) {
+      try {
+        var key = kind + '|' + detail;
+        counts[key] = (counts[key] || 0) + 1;
+        if (counts[key] > 1) return;
+        if (sent >= MAX_EVENTS) return;
+        sent++;
+        buf.push({ t: Date.now() - T0, top: isTop, k: kind, d: detail });
+      } catch (e) { }
+    }
+
+    function flush() {
+      try {
+        if (!buf.length) return;
+        var out = buf.splice(0, buf.length);
+        console.log('[LABPROBE] ' + JSON.stringify(out));
+      } catch (e) { }
+    }
+
+    function summary() {
+      try {
+        var rows = [];
+        Object.keys(counts).forEach(function (k) { if (counts[k] > 2) rows.push([k, counts[k]]); });
+        rows.sort(function (a, b) { return b[1] - a[1]; });
+        if (rows.length) {
+          emit('summary', rows.slice(0, 12).map(function (r) { return r[1] + 'x ' + r[0]; }).join(' ;; ') + ' @' + Math.round((Date.now() - T0) / 1000) + 's');
+        }
+      } catch (e) { }
+    }
+
+    setInterval(flush, 2000);
+    setInterval(summary, 30000);
+    window.addEventListener('pagehide', function () { summary(); flush(); });
+
+    var ref = '';
+    try { ref = document.referrer ? new URL(document.referrer).host : ''; } catch (e) { }
+    emit('doc_start', location.host + maskPath(location.pathname) + ' referrer=' + ref);
+
+    if (isTop) {
+      var brands = '';
+      try {
+        brands = (navigator.userAgentData && navigator.userAgentData.brands || [])
+          .map(function (b) { return b.brand + ' ' + b.version; }).join(',');
+      } catch (e) { }
+      emit('env', JSON.stringify({
+        ua: navigator.userAgent, brands: brands,
+        mobile: navigator.userAgentData ? navigator.userAgentData.mobile : null,
+        w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
+        serviceWorkerApi: !!navigator.serviceWorker
+      }));
+    }
+
+    var ofetch = window.fetch;
+    if (ofetch) {
+      window.fetch = function (input, init) {
+        var tag = 'GET ?';
+        try {
+          var url = (typeof input === 'string') ? input : (input && input.url);
+          var method = (init && init.method) || (input && input.method) || 'GET';
+          tag = method + ' ' + safeUrl(url);
+          emit('fetch', tag);
+        } catch (e) { }
+        var p = ofetch.apply(this, arguments);
+        try {
+          p.then(function (r) { emit('fetch_status', tag + ' -> ' + r.status); },
+                 function (e) { emit('fetch_fail', tag + ' ' + scrub(e && e.name)); });
+        } catch (e) { }
+        return p;
+      };
+    }
+
+    var oopen = window.XMLHttpRequest && XMLHttpRequest.prototype.open;
+    if (oopen) {
+      XMLHttpRequest.prototype.open = function (m, u) {
+        try { emit('xhr', m + ' ' + safeUrl(u)); } catch (e) { }
+        return oopen.apply(this, arguments);
+      };
+    }
+
+    if (window.RTCPeerConnection && RTCPeerConnection.prototype.setRemoteDescription) {
+      var osrd = RTCPeerConnection.prototype.setRemoteDescription;
+      RTCPeerConnection.prototype.setRemoteDescription = function (d) {
+        try { emit('rtc_remote_description', d && d.type); } catch (e) { }
+        return osrd.apply(this, arguments);
+      };
+    }
+
+    function wrapCtor(name, describe) {
+      try {
+        var C = window[name];
+        if (!C || typeof Proxy !== 'function') return;
+        window[name] = new Proxy(C, {
+          construct: function (target, args, newTarget) {
+            try { emit(name, describe(args)); } catch (e) { }
+            return Reflect.construct(target, args, newTarget);
+          }
+        });
+      } catch (e) { }
+    }
+    wrapCtor('WebSocket', function (a) { return safeUrl(a[0]); });
+    wrapCtor('Worker', function (a) { return safeUrl(a[0]); });
+    wrapCtor('SharedWorker', function (a) { return safeUrl(a[0]); });
+    wrapCtor('RTCPeerConnection', function () { return 'created'; });
+
+    ['pushState', 'replaceState'].forEach(function (m) {
+      try {
+        var o = history[m];
+        history[m] = function (s, t, u) {
+          try { emit('history.' + m, u == null ? '' : safeUrl(u)); } catch (e) { }
+          return o.apply(this, arguments);
+        };
+      } catch (e) { }
+    });
+
+    try {
+      var odo = document.open;
+      document.open = function () {
+        try { emit('document.open', location.host + maskPath(location.pathname)); } catch (e) { }
+        return odo.apply(this, arguments);
+      };
+    } catch (e) { }
+
+    if (isTop && navigator.serviceWorker) {
+      try {
+        var oreg = navigator.serviceWorker.register;
+        if (oreg) {
+          navigator.serviceWorker.register = function (u) {
+            try { emit('sw_register', safeUrl(u)); } catch (e) { }
+            return oreg.apply(this, arguments);
+          };
+        }
+        setTimeout(function () {
+          try {
+            navigator.serviceWorker.getRegistrations().then(function (rs) {
+              emit('service_workers', rs.length + ' registered ' + rs.map(function (r) { return safeUrl(r.scope); }).join(','));
+            }, function () { });
+          } catch (e) { }
+        }, 6000);
+      } catch (e) { }
+    }
+
+    window.addEventListener('error', function (e) { emit('js_error', scrub(e && e.message)); }, true);
+    window.addEventListener('unhandledrejection', function (e) {
+      var r = e && e.reason;
+      emit('rejection', scrub((r && (r.message || r.name)) || r));
+    });
+
+    function scan() {
+      try {
+        var t = ((document.body && document.body.innerText) || '').toLowerCase();
+        var keys = ["not available in your region", "isn't available in your region", 'unsupported', 'not supported',
+                    'browser', 'sign in', 'preview', 'game pass', 'install', 'something went wrong'];
+        var hits = keys.filter(function (k) { return t.indexOf(k) >= 0; });
+        emit('page_hints', JSON.stringify({ title: scrub(document.title).slice(0, 60), hits: hits, textLength: t.length }));
+      } catch (e) { }
+    }
+    if (isTop) {
+      setTimeout(scan, 8000);
+      setTimeout(scan, 25000);
+    }
+  } catch (e) { }
+})();
+'''
+
+pp = ROOT / "app/src/main/assets/probe.js"
+if pp.exists() and pp.read_text(encoding="utf-8") == PROBE_JS:
+    print("skip (already applied): assets/probe.js")
+else:
+    pp.write_text(PROBE_JS, encoding="utf-8")
+    changed.append("assets/probe.js")
+    print("applied: assets/probe.js (new file)")
+
+LAB_HELPERS = """    // ---- LAB probe helpers (added by apply_fixes.py, lab branch only) ----
+    private static final boolean LAB_INJECT_OLD_SCRIPT = false;
+
+    private String labReadAsset(String name) {
+        StringBuilder sb = new StringBuilder();
+        try (InputStream is = getAssets().open(name);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) sb.append(line).append('\\n');
+        } catch (IOException ignored) {
+        }
+        return sb.toString();
+    }
+
+    private String labSafeUrl(String url) {
+        try {
+            android.net.Uri u = android.net.Uri.parse(url);
+            String path = u.getPath() == null ? "" : u.getPath().replaceAll(
+                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "{guid}");
+            return u.getScheme() + "://" + u.getHost() + path;
+        } catch (Throwable t) {
+            return "unparsable";
+        }
+    }
+
+    private void labInstallProbe() {
+        try {
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                java.util.Set<String> origins = new java.util.HashSet<>();
+                origins.add("https://play.xbox.com");
+                origins.add("https://www.xbox.com");
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, labReadAsset("probe.js"), origins);
+                DiagnosticLog.log("main", "probe_installed", "document-start script registered");
+            } else {
+                DiagnosticLog.log("main", "probe_unsupported", "this WebView cannot run document-start scripts");
+            }
+        } catch (Throwable t) {
+            DiagnosticLog.logException("main", "probe_install_failed", t);
+        }
+    }
+
+"""
+edit(JAVA,
+     "    private String loadScriptFromAssets() {\n",
+     LAB_HELPERS + "    private String loadScriptFromAssets() {\n",
+     "lab: probe helpers")
+
+edit(JAVA,
+     'webView.loadUrl("https://www.xbox.com/en-US/play");',
+     'webView.loadUrl("https://play.xbox.com/");',
+     "lab: start page is the new Xbox site")
+
+edit(JAVA,
+     '            if (newProgress > 30 && !isScriptInjected && view.getUrl() != null && view.getUrl().contains("play")) {\n',
+     '            if (newProgress > 30 && !isScriptInjected && view.getUrl() != null && view.getUrl().contains("play") && LAB_INJECT_OLD_SCRIPT) {\n',
+     "lab: old site script switched off")
+
+edit(JAVA,
+     "        webView.setWebChromeClient(new CustomWebChromeClient());\n",
+     "        webView.setWebChromeClient(new CustomWebChromeClient());\n        labInstallProbe();\n",
+     "lab: register the probe for every new WebView")
+
+edit(JAVA,
+     '            Log.d(TAG, "WebView Console: " + consoleMessage.message());\n',
+     '            Log.d(TAG, "WebView Console: " + consoleMessage.message());\n'
+     '            String labMsg = consoleMessage.message();\n'
+     '            if (labMsg != null && labMsg.startsWith("[LABPROBE] ")) {\n'
+     '                DiagnosticLog.log("main", "probe", labMsg.substring(11));\n'
+     '            }\n',
+     "lab: copy probe output into the debug log")
+
+edit(JAVA,
+     '                Log.i(TAG, "Page started: " + url);\n',
+     '                Log.i(TAG, "Page started: " + url);\n'
+     '                DiagnosticLog.log("main", "page_started", labSafeUrl(url));\n',
+     "lab: log page starts (host + path only)")
+
+edit(JAVA,
+     "                super.onPageFinished(view, url);\n                setWebviewVisible();\n",
+     "                super.onPageFinished(view, url);\n"
+     "                DiagnosticLog.log(\"main\", \"page_finished\", labSafeUrl(url) + \" | ua=\" + view.getSettings().getUserAgentString());\n"
+     "                setWebviewVisible();\n",
+     "lab: log page finishes (host + path only)")
+
+edit(JAVA,
+     "        logPreviousExits();\n",
+     "        logPreviousExits();\n        DiagnosticLog.log(\"main\", \"app_variant\", \"lab-probe-v1\");\n",
+     "lab: mark this app's debug log as the lab probe build")
 
 print("\nDone." if changed else "\nNothing to change.")
