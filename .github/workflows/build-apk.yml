@@ -1,8 +1,8 @@
-name: Build CloudX Debug APK
+name: Build Xbox Lab APK
 
 on:
   push:
-    branches: [ main ]
+    branches: [ lab ]
   workflow_dispatch:
 
 permissions:
@@ -22,12 +22,17 @@ jobs:
           # tools/apply_fixes.py --reset restores the files it edits to the clean base
           # commit and re-applies every edit, so each build starts from the same state.
           python3 tools/apply_fixes.py --reset
+          # LAB ONLY: make this a separate app (package ".lab", name "Xbox Lab") so it never touches the working app
+          sed -i 's/applicationIdSuffix = ".fixed"/applicationIdSuffix = ".lab"/' app/build.gradle.kts
+          sed -i 's#<string name="app_name">cloudxSolution Fixed</string>#<string name="app_name">Xbox Lab</string>#' app/src/main/res/values/strings.xml
+          grep -q 'applicationIdSuffix = ".lab"' app/build.gradle.kts
+          grep -q '>Xbox Lab<' app/src/main/res/values/strings.xml
           git add app
           if ! git diff --cached --quiet -- app; then
             git config user.name "github-actions"
             git config user.email "github-actions@users.noreply.github.com"
             git commit -m "Apply fixes via tools/apply_fixes.py"
-            git push
+            git push origin "HEAD:refs/heads/${GITHUB_REF_NAME}"
           fi
 
       - name: Set up JDK 17
@@ -47,5 +52,5 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: cloudx-debug-apk
+          name: cloudx-lab-apk
           path: app/build/outputs/apk/debug/*.apk
