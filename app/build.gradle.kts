@@ -100,7 +100,7 @@ android {
 
     buildTypes {
         debug {
-            applicationIdSuffix = ".fixed"
+            applicationIdSuffix = ".lab"
         }
         release {
             isMinifyEnabled = false
