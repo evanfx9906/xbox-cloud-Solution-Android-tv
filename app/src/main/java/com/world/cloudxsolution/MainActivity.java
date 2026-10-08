@@ -332,6 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v1");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -665,6 +666,7 @@ public class MainActivity extends AppCompatActivity {
             @Override
             public void onPageFinished(WebView view, String url) {
                 super.onPageFinished(view, url);
+                DiagnosticLog.log("main", "page_finished", labSafeUrl(url) + " | ua=" + view.getSettings().getUserAgentString());
                 setWebviewVisible();
 
                 // Inject viewport meta tag to force fit
@@ -705,6 +707,7 @@ public class MainActivity extends AppCompatActivity {
                 view.setVisibility(WebView.GONE);
                 super.onPageStarted(view, url, favicon);
                 Log.i(TAG, "Page started: " + url);
+                DiagnosticLog.log("main", "page_started", labSafeUrl(url));
                 if (webView != null && webView.getWebChromeClient() instanceof CustomWebChromeClient) {
                     ((CustomWebChromeClient) webView.getWebChromeClient()).resetInjection();
                 }
@@ -714,6 +717,7 @@ public class MainActivity extends AppCompatActivity {
         WebRtcBridge bridge = new WebRtcBridge(this);
         webView.addJavascriptInterface(bridge, "AndroidBridge");
         webView.setWebChromeClient(new CustomWebChromeClient());
+        labInstallProbe();
     }
 
     public void setWebviewVisible(){
@@ -787,7 +791,7 @@ private boolean debug=false;
                     webView.restoreState(webViewState);
                     if(webView.canGoBack()){webView.goBack();}
                 } else {
-                    webView.loadUrl("https://www.xbox.com/en-US/play");
+                    webView.loadUrl("https://play.xbox.com/");
                 }
             }
             webView.setVisibility(WebView.VISIBLE);
@@ -1148,7 +1152,7 @@ private boolean debug=false;
             if (loadingText != null) {
                 loadingText.setText(newProgress + "%");
             }
-            if (newProgress > 30 && !isScriptInjected && view.getUrl() != null && view.getUrl().contains("play")) {
+            if (newProgress > 30 && !isScriptInjected && view.getUrl() != null && view.getUrl().contains("play") && LAB_INJECT_OLD_SCRIPT) {
                 isScriptInjected = true;
 
                 view.evaluateJavascript(loadScriptFromAssets(), null);
@@ -1158,7 +1162,52 @@ private boolean debug=false;
         @Override
         public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
             Log.d(TAG, "WebView Console: " + consoleMessage.message());
+            String labMsg = consoleMessage.message();
+            if (labMsg != null && labMsg.startsWith("[LABPROBE] ")) {
+                DiagnosticLog.log("main", "probe", labMsg.substring(11));
+            }
             return true;
+        }
+    }
+
+    // ---- LAB probe helpers (added by apply_fixes.py, lab branch only) ----
+    private static final boolean LAB_INJECT_OLD_SCRIPT = false;
+
+    private String labReadAsset(String name) {
+        StringBuilder sb = new StringBuilder();
+        try (InputStream is = getAssets().open(name);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(is, StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) sb.append(line).append('\n');
+        } catch (IOException ignored) {
+        }
+        return sb.toString();
+    }
+
+    private String labSafeUrl(String url) {
+        try {
+            android.net.Uri u = android.net.Uri.parse(url);
+            String path = u.getPath() == null ? "" : u.getPath().replaceAll(
+                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "{guid}");
+            return u.getScheme() + "://" + u.getHost() + path;
+        } catch (Throwable t) {
+            return "unparsable";
+        }
+    }
+
+    private void labInstallProbe() {
+        try {
+            if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
+                java.util.Set<String> origins = new java.util.HashSet<>();
+                origins.add("https://play.xbox.com");
+                origins.add("https://www.xbox.com");
+                androidx.webkit.WebViewCompat.addDocumentStartJavaScript(webView, labReadAsset("probe.js"), origins);
+                DiagnosticLog.log("main", "probe_installed", "document-start script registered");
+            } else {
+                DiagnosticLog.log("main", "probe_unsupported", "this WebView cannot run document-start scripts");
+            }
+        } catch (Throwable t) {
+            DiagnosticLog.logException("main", "probe_install_failed", t);
         }
     }
 
