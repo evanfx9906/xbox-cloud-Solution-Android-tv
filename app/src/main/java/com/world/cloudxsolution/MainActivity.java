@@ -332,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
-        DiagnosticLog.log("main", "app_variant", "lab-probe-v1");
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v2");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -1188,7 +1188,8 @@ private boolean debug=false;
         try {
             android.net.Uri u = android.net.Uri.parse(url);
             String path = u.getPath() == null ? "" : u.getPath().replaceAll(
-                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "{guid}");
+                    "[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", "{guid}")
+                    .replaceAll("[0-9a-fA-F]{16,}", "{hex}").replaceAll("[0-9]{6,}", "{num}");
             return u.getScheme() + "://" + u.getHost() + path;
         } catch (Throwable t) {
             return "unparsable";

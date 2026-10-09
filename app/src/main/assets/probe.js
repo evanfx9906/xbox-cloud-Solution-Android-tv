@@ -1,4 +1,4 @@
-/* Xbox Lab probe (diagnostics only). Runs at document start on play.xbox.com / www.xbox.com.
+/* Xbox Lab probe v2 (diagnostics only). Runs at document start on play.xbox.com / www.xbox.com.
  * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
  * strings, fragments, page text or account names. Addresses are reduced to host + path with
  * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
@@ -15,14 +15,16 @@
     var sent = 0;
     var MAX_EVENTS = 500;
 
+    function maskPiece(s) {
+      s = String(s);
+      s = s.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/ig, '{guid}');
+      s = s.replace(/[0-9a-f]{16,}/ig, '{hex}');
+      s = s.replace(/[0-9]{6,}/g, '{num}');
+      if (s.length > 40) return '{long}';
+      return s;
+    }
     function maskPath(p) {
-      return String(p || '').split('/').map(function (s) {
-        if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)) return '{guid}';
-        if (/^[0-9a-f]{16,}$/i.test(s)) return '{hex}';
-        if (/^[0-9]{6,}$/.test(s)) return '{num}';
-        if (s.length > 40) return '{long}';
-        return s;
-      }).join('/');
+      return String(p || '').split('/').map(maskPiece).join('/');
     }
 
     function safeUrl(u) {
@@ -35,6 +37,76 @@
       } catch (e) {
         return 'unparsable';
       }
+    }
+
+    var VALUE_PARAMS = /^(market|mkt|locale|language|languages|lang|country|countrycode|region|culture|geo|clientlocale|clientcountry|clientlanguage)$/i;
+    var seenReq = {};
+    function reqDetail(u, init, input) {
+      try {
+        var s = String(u);
+        if (/^(blob|data):/i.test(s)) return null;
+        var a = new URL(s, location.href);
+        if (!/(xboxservices\.com|xboxlive\.com|gamepass\.com|xbox\.com)$/i.test(a.hostname)) return null;
+        var names = [];
+        a.searchParams.forEach(function (v, k) {
+          if (VALUE_PARAMS.test(k) && /^[A-Za-z0-9_,\-]{1,14}$/.test(v)) names.push(k + '=' + v);
+          else names.push(k);
+        });
+        var hdrs = [];
+        var h = (init && init.headers) || (input && input.headers);
+        if (h) {
+          if (typeof h.forEach === 'function' && !Array.isArray(h)) h.forEach(function (v, k) { hdrs.push(String(k).toLowerCase()); });
+          else if (Array.isArray(h)) h.forEach(function (p) { hdrs.push(String(p[0]).toLowerCase()); });
+          else Object.keys(h).forEach(function (k) { hdrs.push(k.toLowerCase()); });
+        }
+        var key = a.hostname + maskPath(a.pathname);
+        if (seenReq[key]) return null;
+        seenReq[key] = 1;
+        return 'params[' + names.join(',') + '] headers[' + hdrs.join(',') + ']';
+      } catch (e) { return null; }
+    }
+
+    var OK_KEYS = /^(type|name|kind|state|status|market|region|regions|country|countrycode|locale|culture|language|lang|code|availability|reason|message|action|actions|platform|platforms|cloud|isxcloud|xcloud|supported|enabled|available|iscloud|offeringsettings|allowregionselection|isdefaultregion)$/i;
+    function maskKey(k) { return maskPiece(k); }
+    function scrubValue(v) {
+      var t = String(v);
+      if (/^https?:\/\//i.test(t)) { try { return new URL(t).host; } catch (e) { return 'url'; } }
+      return maskPiece(scrub(t)).slice(0, 60);
+    }
+    function shape(v, depth, key) {
+      if (v === null) return 'null';
+      var t = typeof v;
+      if (t === 'string') return OK_KEYS.test(key || '') ? JSON.stringify(scrubValue(v)) : 'str';
+      if (t === 'number' || t === 'boolean') return OK_KEYS.test(key || '') ? String(v) : t;
+      if (Array.isArray(v)) {
+        var kinds = '';
+        if (v.length && /^(actions|sections|layouts|rows|tiles)$/i.test(key || '')) {
+          kinds = ' kinds=[' + v.slice(0, 12).map(function (e) {
+            var x = e && (e.type || e.actionType || e.kind || e.name);
+            return typeof x === 'string' ? scrubValue(x).slice(0, 30) : '?';
+          }).join('|') + ']';
+        }
+        return 'arr[' + v.length + ']' + kinds + ((v.length && depth <= 3) ? '<' + shape(v[0], depth + 1, key) + '>' : '');
+      }
+      if (t === 'object') {
+        if (depth > 3) return '{..}';
+        var ks = Object.keys(v);
+        return '{' + ks.slice(0, 30).map(function (k) { return maskKey(k) + ':' + shape(v[k], depth + 1, k); }).join(',') + (ks.length > 30 ? ',..' + ks.length : '') + '}';
+      }
+      return t;
+    }
+    var SHAPE_URLS = /(xCloudWebHome|\/api\/details\/[^\/]+\/actions|catalog\.gamepass\.com\/sigls\/v3|contentaccess\.exp\.xboxservices\.com\/all\/v1|title\.mgt\.xboxlive\.com\/titles\/default\/endpoints)/;
+    var shapeCount = {};
+    function captureShape(tag, urlStr, r) {
+      try {
+        if (!SHAPE_URLS.test(urlStr)) return;
+        var k = tag.replace(/\{[a-z]+\}/g, '');
+        shapeCount[k] = (shapeCount[k] || 0) + 1;
+        if (shapeCount[k] > 2) return;
+        r.clone().json().then(function (j) {
+          emit('shape', tag.split(' ')[1].replace(/^https?:\/\//, '') + ' => ' + shape(j, 0, '').slice(0, 1800));
+        }, function () { });
+      } catch (e) { }
     }
 
     function scrub(text) {
@@ -89,7 +161,9 @@
         ua: navigator.userAgent, brands: brands,
         mobile: navigator.userAgentData ? navigator.userAgentData.mobile : null,
         w: window.innerWidth, h: window.innerHeight, dpr: window.devicePixelRatio,
-        serviceWorkerApi: !!navigator.serviceWorker
+        serviceWorkerApi: !!navigator.serviceWorker,
+        lang: navigator.language, langs: (navigator.languages || []).join(','),
+        tz: (function () { try { return Intl.DateTimeFormat().resolvedOptions().timeZone; } catch (e) { return ''; } })()
       }));
     }
 
@@ -97,15 +171,19 @@
     if (ofetch) {
       window.fetch = function (input, init) {
         var tag = 'GET ?';
+        var rawUrl = '';
         try {
           var url = (typeof input === 'string') ? input : (input && input.url);
           var method = (init && init.method) || (input && input.method) || 'GET';
           tag = method + ' ' + safeUrl(url);
           emit('fetch', tag);
+          var rd = reqDetail(url, init, (typeof input === 'string') ? null : input);
+          if (rd) emit('fetch_request', tag + ' ' + rd);
+          rawUrl = String(url);
         } catch (e) { }
         var p = ofetch.apply(this, arguments);
         try {
-          p.then(function (r) { emit('fetch_status', tag + ' -> ' + r.status); },
+          p.then(function (r) { emit('fetch_status', tag + ' -> ' + r.status); captureShape(tag, rawUrl || '', r); },
                  function (e) { emit('fetch_fail', tag + ' ' + scrub(e && e.name)); });
         } catch (e) { }
         return p;
