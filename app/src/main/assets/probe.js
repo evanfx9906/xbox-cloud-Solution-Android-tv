@@ -1,4 +1,4 @@
-/* Xbox Lab probe v4 (diagnostics + market experiment + offering test). Runs at document start on play.xbox.com / www.xbox.com.
+/* Xbox Lab probe v5 (diagnostics + market experiment + offering analysis). Runs at document start on play.xbox.com / www.xbox.com.
  * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
  * strings, fragments, page text or account names. Addresses are reduced to host + path with
  * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
@@ -105,10 +105,10 @@
         if (!OFFER_URL.test(urlStr)) return false;
         var hsrc = (init && init.headers) ? init.headers : ((typeof Request === 'function' && input instanceof Request) ? input.headers : null);
         var ct = r.headers && r.headers.get ? r.headers.get('content-type') : '';
-        r.clone().text().then(function (t) {
-          var hash = h32(t);
-          emit('offer_baseline', r.status + ' ct=' + scrub(ct) + ' len=' + t.length + ' hash=' + hash + ' ' + describeBody(t));
-          offeringTests(urlStr, hsrc, hash);
+        r.clone().arrayBuffer().then(function (buf) {
+          var u8 = new Uint8Array(buf);
+          emit('offer_baseline', r.status + ' ct=' + scrub(ct) + ' ' + describeBinary(u8, true));
+          offeringTests(urlStr, hsrc, u8);
         }, function () { });
         return true;
       } catch (e) { return false; }
@@ -185,43 +185,163 @@
       }));
     }
 
-    // ---- offering test (v4) ----
+    // ---- offering analysis (v5) ----
     var BYPASS_IPS = { US: '143.244.47.65', BR: '169.150.198.66', KR: '121.125.60.151', JP: '138.199.21.239',
                        PL: '45.134.212.66', ES: '80.58.61.250', GB: '62.24.134.1', FR: '212.27.40.240' };
-    function h32(t) {
-      var h = 5381;
-      for (var i = 0; i < t.length; i++) { h = ((h << 5) + h + t.charCodeAt(i)) | 0; }
+    function fnv(u8) {
+      var h = 0x811c9dc5;
+      for (var i = 0; i < u8.length; i++) { h ^= u8[i]; h = Math.imul(h, 0x01000193); }
       return (h >>> 0).toString(16);
     }
-    function describeBody(t) {
-      try { return 'json ' + shape(JSON.parse(t), 0, '').slice(0, 1500); } catch (e) { }
-      try {
-        var m = /^[A-Za-z0-9_-]+\.([A-Za-z0-9_-]+)\.[A-Za-z0-9_-]*$/.exec(String(t).trim());
-        if (m) {
-          var p = JSON.parse(atob(m[1].replace(/-/g, '+').replace(/_/g, '/')));
-          return 'jwt-payload ' + shape(p, 0, '').slice(0, 1500);
+    function findBytes(u8, str) {
+      var n = str.length, codes = [];
+      for (var k = 0; k < n; k++) codes.push(str.charCodeAt(k));
+      for (var i = 0; i + n <= u8.length; i++) {
+        var ok = true;
+        for (var j = 0; j < n; j++) { if (u8[i + j] !== codes[j]) { ok = false; break; } }
+        if (ok) return i;
+      }
+      return -1;
+    }
+    function upperTokens(u8) {
+      var out = {}, cur = '';
+      for (var i = 0; i <= u8.length; i++) {
+        var c = i < u8.length ? u8[i] : 0;
+        if ((c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 95) cur += String.fromCharCode(c);
+        else {
+          if (cur.length >= 6 && cur.length <= 40 && /[A-Z]/.test(cur) && /^[A-Z]/.test(cur)) out[cur] = (out[cur] || 0) + 1;
+          cur = '';
         }
-      } catch (e) { }
-      return 'non-json start=' + String(t).slice(0, 1).replace(/[A-Za-z0-9]/g, 'a');
+      }
+      return out;
+    }
+    function readVarint(u8, p) {
+      var r = 0, mul = 1, b;
+      do {
+        if (p >= u8.length || mul > 4e15) return null;
+        b = u8[p++]; r += (b & 0x7f) * mul; mul *= 128;
+      } while (b & 0x80);
+      return [r, p];
+    }
+    function parseMsg(u8, start, end) {
+      var fields = [], p = start;
+      while (p < end) {
+        var t = readVarint(u8, p); if (!t) return null; p = t[1];
+        var f = Math.floor(t[0] / 8), wt = t[0] % 8;
+        if (f < 1 || f > 100000) return null;
+        if (wt === 0) { var v = readVarint(u8, p); if (!v) return null; fields.push({ f: f, wt: 0, v: v[0] }); p = v[1]; }
+        else if (wt === 1) { if (p + 8 > end) return null; fields.push({ f: f, wt: 1 }); p += 8; }
+        else if (wt === 5) { if (p + 4 > end) return null; fields.push({ f: f, wt: 5 }); p += 4; }
+        else if (wt === 2) {
+          var l = readVarint(u8, p); if (!l) return null; p = l[1];
+          if (p + l[0] > end) return null;
+          fields.push({ f: f, wt: 2, s: p, e: p + l[0] }); p += l[0];
+        } else return null;
+      }
+      return p === end ? fields : null;
+    }
+    function printableText(u8, s, e) {
+      if (e - s === 0) return '';
+      var n = 0;
+      for (var i = s; i < e; i++) { var c = u8[i]; if (c >= 32 && c < 127) n++; }
+      if (n / (e - s) < 0.95) return null;
+      var t = '';
+      for (var j = s; j < Math.min(e, s + 80); j++) t += String.fromCharCode(u8[j]);
+      return t;
+    }
+    // render a length-delimited field: nested message, text, or bytes
+    function renderField(u8, fd, depth) {
+      var txt = printableText(u8, fd.s, fd.e);
+      var nested = (depth < 7 && fd.e - fd.s > 1) ? parseMsg(u8, fd.s, fd.e) : null;
+      if (nested && nested.length && (txt === null || fd.e - fd.s > 80 && nested.length > 1)) return renderMsg(u8, nested, depth + 1);
+      if (txt !== null) return JSON.stringify(scrubValue(txt));
+      return 'bytes[' + (fd.e - fd.s) + ']';
+    }
+    function renderMsg(u8, fields, depth) {
+      var parts = [];
+      for (var i = 0; i < fields.length && i < 24; i++) {
+        var fd = fields[i];
+        if (fd.wt === 0) parts.push(fd.f + ':' + fd.v);
+        else if (fd.wt === 2) parts.push(fd.f + ':' + renderField(u8, fd, depth));
+        else parts.push(fd.f + ':fixed');
+      }
+      if (fields.length > 24) parts.push('..+' + (fields.length - 24));
+      return '{' + parts.join(' ') + '}';
+    }
+    // find the message that directly contains the needle string and render it, plus the path of field numbers leading to it
+    function describeAround(u8, needle) {
+      var idx = findBytes(u8, needle);
+      if (idx < 0) return 'needle-not-found';
+      var s = 0, e = u8.length, path = [], best = null;
+      for (var depth = 0; depth < 10; depth++) {
+        var fields = parseMsg(u8, s, e);
+        if (!fields) break;
+        var hit = null;
+        for (var i = 0; i < fields.length; i++) { if (fields[i].wt === 2 && fields[i].s <= idx && idx < fields[i].e) { hit = fields[i]; break; } }
+        if (!hit) break;
+        path.push(hit.f);
+        var child = parseMsg(u8, hit.s, hit.e);
+        if (child && child.length > 1) { best = { s: hit.s, e: hit.e, fields: child }; s = hit.s; e = hit.e; }
+        else break;
+      }
+      if (!best) return 'could-not-decode (needle at byte ' + idx + ')';
+      return 'path=' + path.join('>') + ' ' + renderMsg(u8, best.fields, 0).slice(0, 1600);
+    }
+    function describeBinary(u8, withTree) {
+      var toks = upperTokens(u8), names = Object.keys(toks).sort();
+      var shown = names.slice(0, 50).map(function (t) { return maskPiece(t); }).join('|');
+      var cloud = findBytes(u8, 'CLOUDGAMING') >= 0;
+      var out = 'bin len=' + u8.length + ' fnv=' + fnv(u8) + ' hasCLOUDGAMING=' + cloud + ' upperTokens=' + names.length + (withTree ? ' [' + shown + ']' : '');
+      if (withTree) {
+        var rootF = parseMsg(u8, 0, u8.length);
+        if (rootF) {
+          var counts = {};
+          rootF.forEach(function (f) { counts[f.f] = (counts[f.f] || 0) + 1; });
+          out += ' rootFields=' + JSON.stringify(counts);
+        } else out += ' rootNotProtobuf';
+        if (cloud) out += ' AROUND_CLOUDGAMING: ' + describeAround(u8, 'CLOUDGAMING');
+      }
+      return out;
+    }
+    function diffSummary(a, b) {
+      if (a.length !== b.length) return 'lengthDiffers(' + a.length + ' vs ' + b.length + ')';
+      var n = 0, first = -1, last = -1;
+      for (var i = 0; i < a.length; i++) { if (a[i] !== b[i]) { n++; if (first < 0) first = i; last = i; } }
+      return n + ' bytes differ' + (n ? ' (first ' + first + ', last ' + last + ')' : '');
+    }
+    function describeBody(t) {   // text bodies (kept for the JSON endpoints)
+      try { return 'json ' + shape(JSON.parse(t), 0, '').slice(0, 1500); } catch (e) { }
+      return 'non-json text len=' + String(t).length;
     }
     var offerTestsDone = false;
-    function offeringTests(urlStr, headersSrc, baseHash) {
+    function offeringTests(urlStr, headersSrc, baseU8) {
       if (offerTestsDone) return;
       offerTestsDone = true;
       var M = '';
       try { M = (window.LabBridge && window.LabBridge.market && window.LabBridge.market()) || ''; } catch (e) { }
-      var ip = BYPASS_IPS[M] || BYPASS_IPS.ES;
-      var variants = [['x-forwarded-for', ip], ['forwarded', 'for=' + ip], ['clientip', ip]];
-      function one(v) {
+      var ip = BYPASS_IPS[M] || BYPASS_IPS.US;
+      var real = realMarket || 'GR';
+      var tests = [
+        ['repeat of the page request', null, null],
+        ['market=' + real + ' (your real one)', real, null],
+        ['market=ES', 'ES', null], ['market=GB', 'GB', null], ['market=PL', 'PL', null],
+        ['x-forwarded-for=' + ip, M || 'US', ['x-forwarded-for', ip]],
+        ['forwarded=for=' + ip, M || 'US', ['forwarded', 'for=' + ip]],
+        ['clientip=' + ip, M || 'US', ['clientip', ip]]
+      ];
+      function one(t) {
+        var a = new URL(urlStr);
+        if (t[1]) a.searchParams.set('market', t[1]);
         var h = new Headers(headersSrc || undefined);
-        h.set(v[0], v[1]);
-        return ofetch.call(window, urlStr, { method: 'GET', headers: h, mode: 'cors' }).then(function (r) {
-          return r.text().then(function (t) {
-            emit('offer_test', v[0] + ' -> ' + r.status + ' len=' + t.length + ' vsBaseline=' + (h32(t) === baseHash ? 'same' : 'DIFFERENT') + ' ' + describeBody(t));
+        if (t[2]) h.set(t[2][0], t[2][1]);
+        return ofetch.call(window, a.toString(), { method: 'GET', headers: h, mode: 'cors' }).then(function (r) {
+          return r.arrayBuffer().then(function (buf) {
+            var u8 = new Uint8Array(buf);
+            emit('offer_test', t[0] + ' -> ' + r.status + ' ' + describeBinary(u8, false) + ' diffVsPage: ' + diffSummary(baseU8, u8));
           });
-        }, function (e) { emit('offer_test', v[0] + ' -> blocked or failed: ' + scrub(e && e.name)); });
+        }, function (e) { emit('offer_test', t[0] + ' -> blocked or failed: ' + scrub(e && e.name)); });
       }
-      variants.reduce(function (p, v) { return p.then(function () { return one(v); }); }, Promise.resolve());
+      tests.reduce(function (p, t) { return p.then(function () { return one(t); }); }, Promise.resolve());
     }
 
     // ---- market experiment ----

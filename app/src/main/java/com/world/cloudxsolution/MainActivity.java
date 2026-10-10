@@ -332,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
-        DiagnosticLog.log("main", "app_variant", "lab-probe-v4");
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v5");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
