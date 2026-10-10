@@ -1,8 +1,10 @@
-/* Xbox Lab probe v2 (diagnostics only). Runs at document start on play.xbox.com / www.xbox.com.
+/* Xbox Lab probe v3 (diagnostics + market experiment). Runs at document start on play.xbox.com / www.xbox.com.
  * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
  * strings, fragments, page text or account names. Addresses are reduced to host + path with
  * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
- * to its debug log. */
+ * to its debug log.
+ * EXPERIMENT (v3): rewrites the market the page sends (market=GR, locale=xx-GR, x-xbl-market header) to
+ * the market chosen in the app's Server Region setting, to test whether the server trusts it. */
 (function () {
   try {
     if (window.__labProbe) return;
@@ -102,7 +104,7 @@
         if (!SHAPE_URLS.test(urlStr)) return;
         var k = tag.replace(/\{[a-z]+\}/g, '');
         shapeCount[k] = (shapeCount[k] || 0) + 1;
-        if (shapeCount[k] > 2) return;
+        if (shapeCount[k] > 4) return;
         r.clone().json().then(function (j) {
           emit('shape', tag.split(' ')[1].replace(/^https?:\/\//, '') + ' => ' + shape(j, 0, '').slice(0, 1800));
         }, function () { });
@@ -147,6 +149,8 @@
     setInterval(summary, 30000);
     window.addEventListener('pagehide', function () { summary(); flush(); });
 
+    if (isTop) { emit('market_target', targetMarket() + ' bridge=' + (window.LabBridge ? 'yes' : 'no')); }
+
     var ref = '';
     try { ref = document.referrer ? new URL(document.referrer).host : ''; } catch (e) { }
     emit('doc_start', location.host + maskPath(location.pathname) + ' referrer=' + ref);
@@ -167,9 +171,105 @@
       }));
     }
 
+    // ---- market experiment ----
+    var realMarket = null;
+    var REWRITE_HOSTS = /(xboxservices\.com|xboxlive\.com|gamepass\.com)$/i;
+    var SKIP_HOSTS = /^(user|xsts|device|title)\.auth\.xboxlive\.com$|^login\./i;
+    var MARKET_PARAMS = /^(market|mkt|country|countrycode|clientcountry)$/i;
+    var LOCALE_PARAMS = /^(locale|clientlocale)$/i;
+
+    function targetMarket() {
+      try {
+        var m = window.LabBridge && window.LabBridge.market && window.LabBridge.market();
+        if (m && /^[A-Z]{2}$/.test(m)) return m;
+      } catch (e) { }
+      return 'ES';
+    }
+
+    function rewritableHost(urlStr) {
+      try {
+        var h = new URL(String(urlStr), location.href).hostname;
+        return REWRITE_HOSTS.test(h) && !SKIP_HOSTS.test(h);
+      } catch (e) { return false; }
+    }
+
+    function rewriteUrlString(s, M) {
+      var out = { url: s, changed: false, note: '' };
+      try {
+        var a = new URL(String(s), location.href);
+        if (!REWRITE_HOSTS.test(a.hostname) || SKIP_HOSTS.test(a.hostname)) return out;
+        var pairs = [];
+        a.searchParams.forEach(function (v, k) { pairs.push([k, v]); });
+        pairs.forEach(function (kv) {                       // pass 1: learn the real market
+          if (MARKET_PARAMS.test(kv[0]) && /^[A-Za-z]{2}$/.test(kv[1]) && !realMarket) realMarket = kv[1].toUpperCase();
+        });
+        var notes = [];
+        pairs.forEach(function (kv) {                       // pass 2: rewrite
+          var k = kv[0], v = kv[1];
+          if (MARKET_PARAMS.test(k) && /^[A-Za-z]{2}$/.test(v)) {
+            if (v.toUpperCase() !== M) { a.searchParams.set(k, M); notes.push(k + ':' + v.toUpperCase() + '>' + M); }
+          } else if (LOCALE_PARAMS.test(k)) {
+            var mm = /^([A-Za-z]{2,3})-([A-Za-z]{2})$/.exec(v);
+            if (mm && realMarket && realMarket !== M && mm[2].toUpperCase() === realMarket) {
+              var nv = mm[1].toLowerCase() + '-' + M;
+              a.searchParams.set(k, nv); notes.push(k + ':' + v + '>' + nv);
+            }
+          }
+        });
+        if (notes.length) { out.url = a.toString(); out.changed = true; out.note = notes.join(','); }
+      } catch (e) { }
+      return out;
+    }
+
+    function rewriteHeaders(src, M) {
+      try {
+        var hh = new Headers(src || undefined);
+        var cur = hh.get('x-xbl-market');
+        if (cur === null) return null;
+        if (!realMarket && /^[A-Za-z]{2}$/.test(cur)) realMarket = cur.toUpperCase();
+        if (cur.toUpperCase() === M) return null;
+        hh.set('x-xbl-market', M);
+        return { headers: hh, note: 'x-xbl-market:' + cur.toUpperCase() + '>' + M };
+      } catch (e) { return null; }
+    }
+
+    // returns null (nothing to change) or { promise } resolving to [input, init]
+    function planRewrite(input, init) {
+      var M = targetMarket();
+      var isReq = (typeof Request === 'function') && (input instanceof Request);
+      var urlStr = isReq ? input.url : String(input);
+      if (!rewritableHost(urlStr)) return null;
+      var u = rewriteUrlString(urlStr, M);
+      var hdrSrc = (init && init.headers) ? init.headers : (isReq ? input.headers : null);
+      var h = rewriteHeaders(hdrSrc, M);
+      if (!u.changed && !h) return null;
+      var note = [u.note, h && h.note].filter(Boolean).join(' ');
+      var host = '';
+      try { host = new URL(urlStr, location.href).hostname + maskPath(new URL(urlStr, location.href).pathname); } catch (e) { }
+      emit('rewrite', host + ' ' + note + (isReq ? ' (Request object)' : ''));
+      if (!isReq) {
+        var ni = Object.assign({}, init || {});
+        if (h) ni.headers = h.headers;
+        return { promise: Promise.resolve([u.changed ? u.url : input, ni]) };
+      }
+      var method = String(input.method || 'GET').toUpperCase();
+      var bodyP = (method === 'GET' || method === 'HEAD') ? Promise.resolve(undefined) : input.clone().arrayBuffer();
+      return {
+        promise: bodyP.then(function (buf) {
+          var base = { method: input.method, headers: input.headers, body: buf, mode: input.mode, credentials: input.credentials,
+                       cache: input.cache, redirect: input.redirect, referrer: input.referrer, referrerPolicy: input.referrerPolicy,
+                       integrity: input.integrity, keepalive: input.keepalive, signal: input.signal };
+          var merged = Object.assign(base, init || {});
+          if (h) merged.headers = h.headers;
+          return [new Request(u.changed ? u.url : input.url, merged), undefined];
+        })
+      };
+    }
+
     var ofetch = window.fetch;
+    var loggedFetch = null;
     if (ofetch) {
-      window.fetch = function (input, init) {
+      loggedFetch = function (input, init) {
         var tag = 'GET ?';
         var rawUrl = '';
         try {
@@ -187,6 +287,18 @@
                  function (e) { emit('fetch_fail', tag + ' ' + scrub(e && e.name)); });
         } catch (e) { }
         return p;
+      };
+    }
+    if (loggedFetch) {
+      window.fetch = function (input, init) {
+        var self = this;
+        var plan = null;
+        try { plan = planRewrite(input, init); } catch (e) { plan = null; }
+        if (!plan) return loggedFetch.call(self, input, init);
+        return plan.promise.then(
+          function (args) { return loggedFetch.call(self, args[0], args[1]); },
+          function (err) { emit('rewrite_failed', scrub(err && err.name)); return loggedFetch.call(self, input, init); }
+        );
       };
     }
 

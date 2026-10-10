@@ -332,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
-        DiagnosticLog.log("main", "app_variant", "lab-probe-v2");
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v3");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -1196,8 +1196,19 @@ private boolean debug=false;
         }
     }
 
+    private class LabBridge {
+        @android.webkit.JavascriptInterface
+        public String market() {
+            String r = getSharedPreferences(PREFS_NAME, MODE_PRIVATE).getString(KEY_REGION, "us");
+            if (r == null) return "";
+            if (r.equals("uk")) return "GB";
+            return r.toUpperCase(java.util.Locale.ROOT);
+        }
+    }
+
     private void labInstallProbe() {
         try {
+            webView.addJavascriptInterface(new LabBridge(), "LabBridge");
             if (androidx.webkit.WebViewFeature.isFeatureSupported(androidx.webkit.WebViewFeature.DOCUMENT_START_SCRIPT)) {
                 java.util.Set<String> origins = new java.util.HashSet<>();
                 origins.add("https://play.xbox.com");
