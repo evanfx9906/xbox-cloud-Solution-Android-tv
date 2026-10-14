@@ -457,14 +457,14 @@ edit(LAYOUT + "dialog_streaming_menu.xml",
      "aspect ratio: menu button")
 
 
-# ---- 8. LAB ONLY (probe v8): probe + market experiment + deeper site-code and site-log reader for the new Xbox site (play.xbox.com) -----------------------------
+# ---- 8. LAB ONLY (probe v9): probe + market experiment + IP-territory experiment for the new Xbox site (play.xbox.com) -----------------------------
 # Purpose: find out what the new site does inside this app, WITHOUT streaming through it yet.
 # The old site script (index.js) is switched off in this lab app. A small diagnostics script
 # (assets/probe.js) runs at document start and records addresses (host + path only), request
 # kinds and statuses, workers, WebRTC use, page replacement, and a few yes/no page hints.
 # It never records cookies, header values (except the market), bodies, tokens, page text or account names.
 # EXPERIMENT: the market the page sends (GR) is rewritten to the app's Server Region setting.
-PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code and site-log reader, deeper). Runs at document start on play.xbox.com / www.xbox.com.
+PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment + site-code reader). Runs at document start on play.xbox.com / www.xbox.com.
  * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
  * strings, fragments, page text or account names. Addresses are reduced to host + path with
  * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
@@ -541,7 +541,7 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
       } catch (e) { return null; }
     }
 
-    var OK_KEYS = /^(id|offering|offerings|offeringid|offeringids|hasaccess|access|allowed|isavailable|tier|subscription|type|name|kind|state|status|market|region|regions|country|countrycode|locale|culture|language|lang|code|availability|reason|message|action|actions|platform|platforms|cloud|isxcloud|xcloud|supported|enabled|available|iscloud|offeringsettings|allowregionselection|isdefaultregion)$/i;
+    var OK_KEYS = /^(territory|ipderivedterritory|ipterritory|clientcountry|id|offering|offerings|offeringid|offeringids|hasaccess|access|allowed|isavailable|tier|subscription|type|name|kind|state|status|market|region|regions|country|countrycode|locale|culture|language|lang|code|availability|reason|message|action|actions|platform|platforms|cloud|isxcloud|xcloud|supported|enabled|available|iscloud|offeringsettings|allowregionselection|isdefaultregion)$/i;
     function maskKey(k) { return maskPiece(k); }
     function scrubValue(v) {
       var t = String(v);
@@ -570,7 +570,7 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
       }
       return t;
     }
-    var SHAPE_URLS = /(xCloudWebHome|\/api\/details\/[^\/]+\/actions|catalog\.gamepass\.com\/sigls\/v3|contentaccess\.exp\.xboxservices\.com\/all\/v1|title\.mgt\.xboxlive\.com\/titles\/default\/endpoints)/;
+    var SHAPE_URLS = /(emerald\.xboxservices\.com\/xboxcomfd\/experimentation|xCloudWebHome|\/api\/details\/[^\/]+\/actions|catalog\.gamepass\.com\/sigls\/v3|contentaccess\.exp\.xboxservices\.com\/all\/v1|title\.mgt\.xboxlive\.com\/titles\/default\/endpoints)/;
     var shapeCount = {};
     var OFFER_URL = /contentaccess\.exp\.xboxservices\.com\/all\/v1/;
     function captureOffering(tag, urlStr, r, input, init) {
@@ -593,7 +593,9 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
         if (shapeCount[k] > 4) return;
         r.clone().json().then(function (j) {
           emit('shape', tag.split(' ')[1].replace(/^https?:\/\//, '') + ' => ' + shape(j, 0, '').slice(0, 1800));
-        }, function () { });
+        }, function () {
+          r.clone().arrayBuffer().then(function (b) { emit('shape', tag.split(' ')[1].replace(/^https?:\/\//, '') + ' => ' + describeBinary(new Uint8Array(b), false)); }, function () { });
+        });
       } catch (e) { }
     }
 
@@ -833,19 +835,22 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
         Array.prototype.forEach.call(document.querySelectorAll('link[rel=modulepreload],link[rel=preload]'), function (el) { add(el.href); });
         try { performance.getEntriesByType('resource').forEach(function (r) { add(r.name); }); } catch (e) { }
         emit('bundles', urls.length + ' scripts: ' + urls.slice(0, 40).map(function (u) { return new URL(u).pathname; }).join(' '));
-        var NEEDLES = [['ipDerivedTerritory', 3, 650], ['shouldShowStreamGate', 2, 800], ['useAttemptToLaunchCloudStream', 2, 800], ['market-eligibility', 2, 500], ['Failed to fetch title info', 1, 500]];
+        var NEEDLES = [[/[,;{(\s]yl=[^,;]{0,160}/, 3, 260], ['Invalid market-decision territory specified via developer c', 1, 700], [/ipDerivedTerritory:\s*this\.createRelationalQuery/, 1, 900], ['Unknown offering with ID', 1, 900], ['native bridge absent', 1, 900]];
         var found = {}, total = 0;
         urls.slice(0, 80).reduce(function (p, u) {
           return p.then(function () {
             return ofetch.call(window, u, { cache: 'force-cache' }).then(function (r) { return r.text(); }).then(function (t) {
               NEEDLES.forEach(function (nd) {
-                var need = nd[0], from = 0, idx;
-                while ((found[need] || 0) < nd[1] && (idx = t.indexOf(need, from)) >= 0) {
-                  found[need] = (found[need] || 0) + 1;
-                  from = idx + need.length;
-                  var ctx = t.slice(Math.max(0, idx - nd[2]), Math.min(t.length, idx + need.length + nd[2])).replace(/\s+/g, ' ');
+                var need = nd[0], from = 0, idx, mlen, label = String(need);
+                for (;;) {
+                  if ((found[label] || 0) >= nd[1]) break;
+                  if (need instanceof RegExp) { var rm = need.exec(t.slice(from)); if (!rm) break; idx = from + rm.index; mlen = rm[0].length; }
+                  else { idx = t.indexOf(need, from); if (idx < 0) break; mlen = need.length; }
+                  found[label] = (found[label] || 0) + 1;
+                  from = idx + mlen;
+                  var ctx = t.slice(Math.max(0, idx - nd[2]), Math.min(t.length, idx + mlen + nd[2])).replace(/\s+/g, ' ');
                   total += ctx.length;
-                  if (total < 50000) emit('code_hit', need + ' in ' + new URL(u).pathname + ' @' + idx + ': ' + ctx);
+                  if (total < 50000) emit('code_hit', label.slice(0, 60) + ' in ' + new URL(u).pathname + ' @' + idx + ': ' + ctx);
                 }
               });
             }, function () { });
@@ -854,6 +859,7 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
       } catch (e) { }
     }
     function inventory() {
+      try { emit('cookie_names', document.cookie.split(';').map(function (c) { return maskPiece(c.split('=')[0].trim()); }).filter(Boolean).slice(0, 40).join(',')); } catch (e) { }
       try {
         var ls = [], ss = [], i;
         for (i = 0; i < localStorage.length; i++) ls.push(localStorage.key(i));
@@ -1012,15 +1018,30 @@ PROBE_JS = r'''/* Xbox Lab probe v8 (diagnostics + market experiment + site-code
       return out;
     }
 
+    var IP_HEADERS = ['forwarded', 'clientip', 'x-forwarded-for', 'x-client-ip'];
+    function swapIp(name, value, ip) {
+      var v = String(value);
+      var v4 = /\b\d{1,3}(\.\d{1,3}){3}\b/;
+      if (v4.test(v)) return v.replace(v4, ip);
+      if (/:[0-9a-f]*:/i.test(v)) return name === 'forwarded' ? 'for=' + ip : ip;
+      return null;
+    }
     function rewriteHeaders(src, M) {
       try {
-        var hh = new Headers(src || undefined);
+        var hh = new Headers(src || undefined), notes = [], changed = false;
         var cur = hh.get('x-xbl-market');
-        if (cur === null) return null;
-        if (!realMarket && /^[A-Za-z]{2}$/.test(cur)) realMarket = cur.toUpperCase();
-        if (cur.toUpperCase() === M) return null;
-        hh.set('x-xbl-market', M);
-        return { headers: hh, note: 'x-xbl-market:' + cur.toUpperCase() + '>' + M };
+        if (cur !== null) {
+          if (!realMarket && /^[A-Za-z]{2}$/.test(cur)) realMarket = cur.toUpperCase();
+          if (cur.toUpperCase() !== M) { hh.set('x-xbl-market', M); notes.push('x-xbl-market:' + cur.toUpperCase() + '>' + M); changed = true; }
+        }
+        var ip = BYPASS_IPS[M] || BYPASS_IPS.US;
+        IP_HEADERS.forEach(function (nm) {
+          var v = hh.get(nm);
+          if (v === null) return;
+          var nv = swapIp(nm, v, ip);
+          if (nv !== null && nv !== v) { hh.set(nm, nv); notes.push(nm + ':client-ip>' + M + '-ip'); changed = true; }
+        });
+        return changed ? { headers: hh, note: notes.join(',') } : null;
       } catch (e) { return null; }
     }
 
@@ -1325,7 +1346,7 @@ edit(JAVA,
 
 edit(JAVA,
      "        logPreviousExits();\n",
-     "        logPreviousExits();\n        DiagnosticLog.log(\"main\", \"app_variant\", \"lab-probe-v8\");\n",
+     "        logPreviousExits();\n        DiagnosticLog.log(\"main\", \"app_variant\", \"lab-probe-v9\");\n",
      "lab: mark this app's debug log as the lab probe build")
 
 print("\nDone." if changed else "\nNothing to change.")
