@@ -457,14 +457,14 @@ edit(LAYOUT + "dialog_streaming_menu.xml",
      "aspect ratio: menu button")
 
 
-# ---- 8. LAB ONLY (probe v9): probe + market experiment + IP-territory experiment for the new Xbox site (play.xbox.com) -----------------------------
+# ---- 8. LAB ONLY (probe v10): probe + market experiment + default-offering patch for the new Xbox site (play.xbox.com) -----------------------------
 # Purpose: find out what the new site does inside this app, WITHOUT streaming through it yet.
 # The old site script (index.js) is switched off in this lab app. A small diagnostics script
 # (assets/probe.js) runs at document start and records addresses (host + path only), request
 # kinds and statuses, workers, WebRTC use, page replacement, and a few yes/no page hints.
 # It never records cookies, header values (except the market), bodies, tokens, page text or account names.
 # EXPERIMENT: the market the page sends (GR) is rewritten to the app's Server Region setting.
-PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment + site-code reader). Runs at document start on play.xbox.com / www.xbox.com.
+PROBE_JS = r'''/* Xbox Lab probe v10 (market + experiment-flag patch: defaultOffering CLOUDGAMING -> XGPUWEB, streaming-server header). Runs at document start on play.xbox.com / www.xbox.com.
  * Records WHAT the page does, never what it contains: no cookies, headers, bodies, tokens, query
  * strings, fragments, page text or account names. Addresses are reduced to host + path with
  * id-like path pieces masked. Output goes to console.log("[LABPROBE] ...") and the app writes it
@@ -1026,7 +1026,7 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
       if (/:[0-9a-f]*:/i.test(v)) return name === 'forwarded' ? 'for=' + ip : ip;
       return null;
     }
-    function rewriteHeaders(src, M) {
+    function rewriteHeaders(src, M, host) {
       try {
         var hh = new Headers(src || undefined), notes = [], changed = false;
         var cur = hh.get('x-xbl-market');
@@ -1041,7 +1041,9 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
           var nv = swapIp(nm, v, ip);
           if (nv !== null && nv !== v) { hh.set(nm, nv); notes.push(nm + ':client-ip>' + M + '-ip'); changed = true; }
         });
-        return changed ? { headers: hh, note: notes.join(',') } : null;
+        var gssv = !!host && /\.gssv-play-prod\.xboxlive\.com$/i.test(host);
+        if (gssv && hh.get('x-forwarded-for') === null) { hh.set('x-forwarded-for', ip); notes.push('gssv:x-forwarded-for added'); changed = true; }
+        return changed ? { headers: hh, note: notes.join(','), gssv: gssv } : null;
       } catch (e) { return null; }
     }
 
@@ -1067,6 +1069,54 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
       return null;
     }
 
+    var EXP_URL = /emerald\.xboxservices\.com\/xboxcomfd\/experimentation/;
+    function patchExperimentation(r) {
+      try {
+        if (!r || !r.ok) return r;
+        return r.clone().json().then(function (j) {
+          try {
+            var tr0 = j && j.exp && j.exp.treatments && j.exp.treatments.PlayXbox;
+            if (tr0) {
+              var out0 = [];
+              Object.keys(tr0).forEach(function (k) {
+                if (/offering|cloud|stream|xgpu|region|territory|market|gate/i.test(k)) out0.push(k + '=' + scrubLog(JSON.stringify(tr0[k])).slice(0, 220));
+              });
+              emit('exp_treatments_original', out0.join(' ;; ').slice(0, 4000));
+            }
+          } catch (e) { }
+          var changes = [];
+          (function walk(o, path, d) {
+            if (!o || typeof o !== 'object' || d > 9) return;
+            Object.keys(o).forEach(function (k) {
+              var v = o[k];
+              if (typeof v === 'string' && v.length < 4000 && /cloudgaming/i.test(v)) {
+                o[k] = v.replace(/CLOUDGAMING/g, 'XGPUWEB').replace(/cloudgaming/g, 'xgpuweb').replace(/CloudGaming/g, 'XgpuWeb');
+                changes.push(maskKey(path + '.' + k));
+              } else if (v && typeof v === 'object') walk(v, path + '.' + k, d + 1);
+            });
+          })(j, '', 0);
+          try {
+            var tr = j && j.exp && j.exp.treatments && j.exp.treatments.PlayXbox;
+            if (tr) {
+              var out = [];
+              Object.keys(tr).forEach(function (k) {
+                if (/offering|cloud|stream|xgpu|region|territory|market|gate/i.test(k)) out.push(k + '=' + scrubLog(JSON.stringify(tr[k])).slice(0, 220));
+              });
+              emit('exp_treatments_after_patch', out.join(' ;; ').slice(0, 4000));
+            }
+            var fl = j && j.exp && j.exp.flights;
+            if (fl && fl.filter) emit('exp_flights', fl.filter(function (x) { return /offering|cloud|stream|xgpu|region|territory|market|gate/i.test(String(x)); }).slice(0, 40).join(','));
+          } catch (e) { }
+          emit('exp_patch', changes.length ? 'changed ' + changes.length + ' value(s): ' + changes.slice(0, 8).join(',') : 'no CLOUDGAMING value found in the answer');
+          if (!changes.length) return r;
+          var hdrs = new Headers(r.headers); hdrs.delete('content-length'); hdrs.delete('content-encoding');
+          var nr = new Response(JSON.stringify(j), { status: r.status, statusText: r.statusText, headers: hdrs });
+          try { Object.defineProperty(nr, 'url', { value: r.url }); } catch (e) { }
+          return nr;
+        }, function () { return r; });
+      } catch (e) { return r; }
+    }
+
     // returns null (nothing to change) or { promise } resolving to [input, init]
     function planRewrite(input, init) {
       var M = targetMarket();
@@ -1075,7 +1125,9 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
       if (!rewritableHost(urlStr)) return null;
       var u = rewriteUrlString(urlStr, M);
       var hdrSrc = (init && init.headers) ? init.headers : (isReq ? input.headers : null);
-      var h = rewriteHeaders(hdrSrc, M);
+      var hostName = '';
+      try { hostName = new URL(urlStr, location.href).hostname; } catch (e) { }
+      var h = rewriteHeaders(hdrSrc, M, hostName);
       var bm0 = (!isReq && init && typeof init.body === 'string') ? rewriteBodyMarket(init.body, M) : null;
       if (!u.changed && !h && !bm0) return null;
       var bm = (!isReq && init && typeof init.body === 'string') ? rewriteBodyMarket(init.body, M) : null;
@@ -1084,15 +1136,17 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
       var host = '';
       try { host = new URL(urlStr, location.href).hostname + maskPath(new URL(urlStr, location.href).pathname); } catch (e) { }
       emit('rewrite', host + ' ' + note + (isReq ? ' (Request object)' : ''));
+      var gssvAdded = !!(h && h.gssv && /gssv:/.test(h.note || ''));
       if (!isReq) {
         var ni = Object.assign({}, init || {});
         if (h && h.headers) ni.headers = h.headers;
         if (bm) ni.body = bm.body;
-        return { promise: Promise.resolve([u.changed ? u.url : input, ni]) };
+        return { gssvAdded: gssvAdded, promise: Promise.resolve([u.changed ? u.url : input, ni]) };
       }
       var method = String(input.method || 'GET').toUpperCase();
       var bodyP = (method === 'GET' || method === 'HEAD') ? Promise.resolve(undefined) : input.clone().arrayBuffer();
       return {
+        gssvAdded: gssvAdded,
         promise: bodyP.then(function (buf) {
           var base = { method: input.method, headers: input.headers, body: buf, mode: input.mode, credentials: input.credentials,
                        cache: input.cache, redirect: input.redirect, referrer: input.referrer, referrerPolicy: input.referrerPolicy,
@@ -1125,6 +1179,7 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
           p.then(function (r) { emit('fetch_status', tag + ' -> ' + r.status); captureShape(tag, rawUrl || '', r); captureOffering(tag, rawUrl || '', r, input, init); },
                  function (e) { emit('fetch_fail', tag + ' ' + scrub(e && e.name)); });
         } catch (e) { }
+        if (EXP_URL.test(rawUrl || '')) return p.then(patchExperimentation);
         return p;
       };
     }
@@ -1135,7 +1190,11 @@ PROBE_JS = r'''/* Xbox Lab probe v9 (market experiment + IP-territory experiment
         try { plan = planRewrite(input, init); } catch (e) { plan = null; }
         if (!plan) return loggedFetch.call(self, input, init);
         return plan.promise.then(
-          function (args) { return loggedFetch.call(self, args[0], args[1]); },
+          function (args) {
+            var q = loggedFetch.call(self, args[0], args[1]);
+            if (plan.gssvAdded) return q.catch(function (e) { emit('gssv_header_blocked', scrub(e && e.name)); return loggedFetch.call(self, input, init); });
+            return q;
+          },
           function (err) { emit('rewrite_failed', scrub(err && err.name)); return loggedFetch.call(self, input, init); }
         );
       };
@@ -1346,7 +1405,7 @@ edit(JAVA,
 
 edit(JAVA,
      "        logPreviousExits();\n",
-     "        logPreviousExits();\n        DiagnosticLog.log(\"main\", \"app_variant\", \"lab-probe-v9\");\n",
+     "        logPreviousExits();\n        DiagnosticLog.log(\"main\", \"app_variant\", \"lab-probe-v10\");\n",
      "lab: mark this app's debug log as the lab probe build")
 
 print("\nDone." if changed else "\nNothing to change.")
