@@ -332,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
-        DiagnosticLog.log("main", "app_variant", "lab-probe-v10");
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v11");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -1196,6 +1196,22 @@ private boolean debug=false;
         }
     }
 
+    private boolean labWebStreamActive() {
+        try {
+            String u = webView == null ? null : webView.getUrl();
+            return u != null && u.contains("/stream/");
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private void labAspectLabel(final Button b, boolean cycle) {
+        String js = cycle ? "window.__labAspectCycle && window.__labAspectCycle()" : "window.__labAspectLabel && window.__labAspectLabel()";
+        webView.evaluateJavascript(js, value -> {
+            if (value != null && value.length() > 4) b.setText(value.replaceAll("[^A-Za-z0-9:%() /.-]", "").trim());
+        });
+    }
+
     private class LabBridge {
         @android.webkit.JavascriptInterface
         public String market() {
@@ -1255,17 +1271,25 @@ private boolean debug=false;
         Button btnExportDiagLog = dialog.findViewById(R.id.btn_export_diag_log);
         btnExportDiagLog.setOnClickListener(v -> exportDiagnosticLog());
         Button btnAspect = dialog.findViewById(R.id.btn_aspect_ratio);
-        btnAspect.setText(aspectModeLabel());
-        btnAspect.setOnClickListener(v -> {
-            cycleAspectMode();
+        if (labWebStreamActive()) {
+            labAspectLabel(btnAspect, false);
+        } else {
             btnAspect.setText(aspectModeLabel());
+        }
+        btnAspect.setOnClickListener(v -> {
+            if (labWebStreamActive()) {
+                labAspectLabel(btnAspect, true);
+            } else {
+                cycleAspectMode();
+                btnAspect.setText(aspectModeLabel());
+            }
         });
         if(!isStreaming()){
             btnExit.setVisibility(View.GONE);
             btnPerformanceToggle.setVisibility(View.GONE);
             btnNexus.setVisibility(View.GONE);
             btnMic.setVisibility(View.GONE);
-            btnAspect.setVisibility(View.GONE);
+            if (!labWebStreamActive()) btnAspect.setVisibility(View.GONE);
         }
 
         // Initial Mic State
