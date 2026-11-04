@@ -332,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
         logPreviousExits();
-        DiagnosticLog.log("main", "app_variant", "lab-probe-v12");
+        DiagnosticLog.log("main", "app_variant", "lab-probe-v13");
 
         android.content.SharedPreferences gpPrefs = getSharedPreferences(PREFS_NAME, MODE_PRIVATE);
         float dz = gpPrefs.getFloat("camera_deadzone", 0.12f);
@@ -1206,9 +1206,21 @@ private boolean debug=false;
     }
 
     private void labAspectLabel(final Button b, boolean cycle) {
-        String js = cycle ? "window.__labAspectCycle && window.__labAspectCycle()" : "window.__labAspectLabel && window.__labAspectLabel()";
-        webView.evaluateJavascript(js, value -> {
-            if (value != null && value.length() > 4) b.setText(value.replaceAll("[^A-Za-z0-9:%() /.-]", "").trim());
+        // v13 fix: once the native handover has actually taken over the stream (window.__labNativeActive),
+        // there is no <video> element left for the JS-side cycler to scale, so the EXISTING native
+        // aspect control (the same one the original app uses) must drive the button instead.
+        webView.evaluateJavascript("!!window.__labNativeActive", nativeActive -> {
+            if ("true".equals(nativeActive)) {
+                if (cycle) {
+                    cycleAspectMode();
+                }
+                b.setText(aspectModeLabel());
+                return;
+            }
+            String js = cycle ? "window.__labAspectCycle && window.__labAspectCycle()" : "window.__labAspectLabel && window.__labAspectLabel()";
+            webView.evaluateJavascript(js, value -> {
+                if (value != null && value.length() > 4) b.setText(value.replaceAll("[^A-Za-z0-9:%() /.-]", "").trim());
+            });
         });
     }
 
